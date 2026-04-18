@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cadlang"
+version = "0.1.0"
+description = "Declarative DSL for 3D CAD parts in Python — emits STL (via manifold3d CSG) and Fusion 360 scripts from one source; includes STEP importer and assembly mate solver."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Sebastian Godelet" }]
+keywords = ["cad", "3d", "stl", "fusion360", "step", "dsl", "manifold3d"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+    "Topic :: Scientific/Engineering",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy>=2.2",
+    "trimesh>=4.11",
+    "matplotlib>=3.10",
+    "manifold3d>=3.4",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+cadlang = "cadlang:main"
+
+[project.urls]
+Homepage = "https://github.com/sebgod/cadlang"
+Repository = "https://github.com/sebgod/cadlang"
+
+[tool.setuptools]
+py-modules = ["cadlang", "assembly", "stepimport"]

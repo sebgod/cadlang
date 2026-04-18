@@ -1,6 +1,9 @@
 # Python
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
 
 # Generated artifacts (from STEP import via `cadlang build`)
 *.g.cad.py

@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  MPLBACKEND: Agg
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install cadlang
+        run: pip install .
+
+      - name: cadlang --help
+        run: cadlang --help
+
+      - name: Round-trip hand-written part
+        run: python example-project/SWQ8-Dewshield-Holder/parts/overlap_ring.cad.py
+
+      - name: Build example project
+        working-directory: example-project/SWQ8-Dewshield-Holder
+        run: cadlang build
+
+      - name: Verify outputs exist and are non-empty
+        run: |
+          test -s example-project/SWQ8-Dewshield-Holder/DewShield.stl
+          test -s example-project/SWQ8-Dewshield-Holder/DewShield_preview.png
+          test -s example-project/SWQ8-Dewshield-Holder/parts/overlap_ring.stl
+          test -s example-project/SWQ8-Dewshield-Holder/parts/overlap_ring_preview.png
+          test -s example-project/SWQ8-Dewshield-Holder/parts/overlap_ring_fusion.py
