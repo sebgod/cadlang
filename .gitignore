@@ -2,7 +2,8 @@
 __pycache__/
 *.pyc
 
-# Generated artifacts (from STEP-imported .g.cad.py parts)
+# Generated artifacts (from STEP import via `cadlang build`)
+*.g.cad.py
 *.g.stl
 *.g_preview.png
 *.g_fusion.py
