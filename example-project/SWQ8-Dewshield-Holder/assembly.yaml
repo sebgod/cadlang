@@ -1,0 +1,107 @@
+# Dew-shield assembly: 3 rings + 8 rails, positioned by their mating interfaces.
+#
+# Built via the project pipeline (`cadlang build` from this project dir) or
+# directly (`python ../../assembly.py assembly.yaml`).
+#
+# Topology (mate tree rooted at middle_ring):
+#
+#   top_ring              ← placed by its own tab[0] mating to upper_rails[0].sky_end
+#        │
+#        │ upper_rails    ← each rail[i].scope_end → middle_ring.tabs[i, upper pair]
+#        │
+#   middle_ring (anchor, at origin)
+#        │
+#        │ lower_rails    ← each rail[i].sky_end   → middle_ring.tabs[i, lower pair]
+#        │
+#   bottom_ring           ← placed by its own tab[0] mating to lower_rails[0].scope_end
+#
+# All alignment is derived — the only hand-entered numbers are the measured
+# interface geometry (bolt-hole positions, ring OD, hole z-values).
+
+name: DewShield
+units: mm
+
+interfaces:
+  SWQ8_part001:                          # the existing SWQ8 end ring
+    tabs:
+      kind: tabbed_hole_stack
+      radius: 125.2                      # OD where the holes open
+      tab_count: 4
+      tab_phase_deg: 0                   # first tab at phi=0
+      hole_z: [5, 11.667, 18.333, 25]    # intrinsic z positions (bottom to top)
+
+  SWQ8_part002:                          # the support rail (in STEP-laid-flat pose)
+    scope_end:
+      kind: bolt_pair
+      positions:
+        - [-56.917, -155.2, 3.3]
+        - [-50.25,  -155.2, 3.3]
+      axis: [0, 0, 1]                    # bolt direction = rail's local +Z
+    sky_end:
+      kind: bolt_pair
+      positions:
+        - [50.25,  -155.2, 3.3]
+        - [56.917, -155.2, 3.3]
+      axis: [0, 0, 1]
+
+parts:
+  middle_ring:
+    source: parts/SWQ8_part001.g.cad.py
+    anchor: true
+
+  top_ring:
+    source: parts/SWQ8_part001.g.cad.py
+
+  bottom_ring:
+    source: parts/SWQ8_part001.g.cad.py
+
+  upper_rails:
+    source: parts/SWQ8_part002.g.cad.py
+    count: 4
+
+  lower_rails:
+    source: parts/SWQ8_part002.g.cad.py
+    count: 4
+
+mates:
+  # Each upper rail's scope-end bolts the middle ring's UPPER hole pair
+  # (indices 2,3 = z=18.333, z=25) on its own tab.
+  - part: upper_rails
+    from: scope_end
+    to:
+      part: middle_ring
+      interface: tabs
+      tab: "{i}"
+      holes: [2, 3]
+
+  # Top ring positioned by its tab[0]'s LOWER hole pair mating to upper_rails[0].sky_end.
+  - part: top_ring
+    from:
+      interface: tabs
+      tab: 0
+      holes: [0, 1]
+    to:
+      part: upper_rails
+      instance: 0
+      interface: sky_end
+
+  # Each lower rail's sky-end bolts the middle ring's LOWER hole pair
+  # (indices 0,1 = z=5, z=11.667) on its own tab.
+  - part: lower_rails
+    from: sky_end
+    to:
+      part: middle_ring
+      interface: tabs
+      tab: "{i}"
+      holes: [0, 1]
+
+  # Bottom ring positioned by its tab[0]'s UPPER hole pair mating to lower_rails[0].scope_end.
+  - part: bottom_ring
+    from:
+      interface: tabs
+      tab: 0
+      holes: [2, 3]
+    to:
+      part: lower_rails
+      instance: 0
+      interface: scope_end

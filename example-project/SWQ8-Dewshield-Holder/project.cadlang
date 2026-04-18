@@ -1,0 +1,22 @@
+# cadlang project manifest.
+# Run `cadlang build` from this directory to execute the pipeline.
+# All paths are relative to the directory containing this file.
+
+name: SWQ8-Dewshield-Holder
+description: >
+  Reverse-engineer the SWQ8 dew-shield holder (ring + support rail) from its
+  STEP export, then stand up a 3-ring + 8-rail assembly positioned by the
+  rail's bolt-hole pattern.
+
+steps:
+  # 1. Turn the STEP file into cadlang descriptions under parts/.
+  #    Produces parts/SWQ8_part001.g.cad.py (ring) and
+  #    parts/SWQ8_part002.g.cad.py (support rail).
+  - import:
+      source: SWQ8DewShieldHolder.step
+      name: SWQ8
+      out: parts/
+
+  # 2. Compose the dew-shield assembly (combined STL + preview written
+  #    next to assembly.yaml).
+  - assemble: assembly.yaml

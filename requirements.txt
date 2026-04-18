@@ -1,0 +1,5 @@
+numpy>=2.2
+trimesh>=4.11
+matplotlib>=3.10
+manifold3d>=3.4
+pyyaml>=6.0
