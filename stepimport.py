@@ -131,7 +131,10 @@ def axis2_frame(db, ref):
 # =========================================================================
 
 def cylinders(db):
-    """Yield dicts with axis origin, axis direction, radius for every CYLINDRICAL_SURFACE."""
+    """Yield dicts with axis origin, axis direction, radius for every CYLINDRICAL_SURFACE.
+
+    `ref_x` is the cylinder's local 0-degree direction (perpendicular to the
+    axis) — needed to compute angular coordinates for trim analysis."""
     for ref, (typ, args) in db.items():
         if typ != 'CYLINDRICAL_SURFACE':
             continue
@@ -142,6 +145,7 @@ def cylinders(db):
             'ref': ref,
             'origin': origin,
             'axis': z,
+            'ref_x': x,
             'radius': radius,
         }
 
@@ -467,6 +471,64 @@ def _cylinder_axis_span(db, cyl, face_idx):
     return min(projections), max(projections)
 
 
+def _cylinder_angular_coverage_deg(db, cyls, face_idx):
+    """Return the angular coverage (in degrees, 0..360) of all face patches
+    on the cylinders in `cyls` (expected to share a cylinder axis line).
+    Used to tell a shallow saddle surface (narrow arc) from an actual
+    through-cut (~360°).
+
+    Method: gather edge-vertex points on every face, project each into the
+    plane perpendicular to the axis, compute its polar angle around
+    cyl['ref_x'], and report `360 - (largest gap between consecutive
+    sorted angles)`. A continuous face covering [265°, 275°] reports 10°;
+    a full cylinder represented as two 180° halves reports ~180° per half
+    or ~360° when both halves are combined.
+    """
+    if not cyls:
+        return None
+    # Use the first cylinder's frame as the reference (they're co-axial by
+    # grouping).
+    axis = np.array(cyls[0]['axis'])
+    origin = np.array(cyls[0]['origin'])
+    rx_raw = cyls[0].get('ref_x')
+    if rx_raw is None:
+        # No explicit ref_x stored — pick any vector perpendicular to the axis.
+        ref_x = np.array([0.0, 1.0, 0.0]) if abs(axis[0]) > 0.9 else np.array([1.0, 0.0, 0.0])
+    else:
+        ref_x = np.array(rx_raw, dtype=float)
+    # Gram-Schmidt to guarantee perpendicularity.
+    ref_x = ref_x - np.dot(ref_x, axis) * axis
+    if np.linalg.norm(ref_x) < 1e-9:
+        return None
+    ref_x = ref_x / np.linalg.norm(ref_x)
+    axis_y = np.cross(axis, ref_x)
+
+    phis: list[float] = []
+    for c in cyls:
+        faces = face_idx.get(c['ref'], [])
+        for fr in faces:
+            for edge_ref in _face_edge_refs(db, fr):
+                e_t, _ = db[edge_ref]
+                if e_t != 'EDGE_CURVE':
+                    continue
+                for pt in _edge_vertex_points(db, edge_ref):
+                    perp = pt - origin - np.dot(pt - origin, axis) * axis
+                    u = float(np.dot(perp, ref_x))
+                    v = float(np.dot(perp, axis_y))
+                    if abs(u) < 1e-9 and abs(v) < 1e-9:
+                        continue
+                    phi = float(np.degrees(np.arctan2(v, u))) % 360.0
+                    phis.append(phi)
+    uniq = sorted({round(p, 2) for p in phis})
+    if len(uniq) < 2:
+        return None
+    # Largest gap around the circle = uncovered region; coverage is the
+    # complement.
+    gaps = [uniq[i + 1] - uniq[i] for i in range(len(uniq) - 1)]
+    gaps.append(uniq[0] + 360.0 - uniq[-1])   # wrap gap
+    return 360.0 - max(gaps)
+
+
 def _saddle_cut_groups(bcyls, db=None, face_idx=None):
     """Detect lateral-axis large-radius cylinders that represent concave
     cut-outs (e.g. the rail's ring-mating saddle).
@@ -531,6 +593,9 @@ def _saddle_cut_groups(bcyls, db=None, face_idx=None):
                 a, b = sorted([lo_canon, hi_canon])
                 lo_world = a if lo_world is None else min(lo_world, a)
                 hi_world = b if hi_world is None else max(hi_world, b)
+        coverage = None
+        if db is not None and face_idx is not None:
+            coverage = _cylinder_angular_coverage_deg(db, grp, face_idx)
         out.append({
             'radius_mm': r,
             'axis_dir': dir_key,
@@ -538,6 +603,20 @@ def _saddle_cut_groups(bcyls, db=None, face_idx=None):
             'start': lo_world,
             'end': hi_world,
             'raw_count': len(grp),
+            'arc_coverage_deg': coverage,
+            # `narrow_arc`: the face spans < ~60° of the cylinder, which
+            # means the STEP encodes a shallow surface patch rather than
+            # a through-cut. Whether cadlang can faithfully emit it as a
+            # `cut(Circle)` depends on how much of the body the infinite
+            # cylinder would carve — that gate lives in the emitter
+            # (`_emit_extrude_cadpy`), because it needs the body's
+            # z-extent. A narrow-arc cylinder producing a shallow carve
+            # (0-20% of body thickness) is emitted as-is: the infinite-
+            # cylinder approximation is close enough. A narrow-arc
+            # cylinder that would over-carve (e.g. sad1 on the dewshield
+            # rail, 50% of body thickness) is the one we can't express
+            # yet, so it's skipped with a warning.
+            'narrow_arc': (coverage is not None and coverage < 60.0),
         })
     # largest-radius groups first (likely the main saddle)
     out.sort(key=lambda g: -g['radius_mm'])
@@ -782,8 +861,49 @@ def _emit_revolve_cadpy(body, source_step: str) -> str:
 
 
 def _emit_extrude_cadpy(body, source_step: str) -> str:
+    """Emit a layered extrude with saddle-shaped tops.
+
+    Each layer is extruded TALL and then its matching lateral cylinder
+    (matched by x-extent) is subtracted — that carves the layer's top
+    into the concave shape the STEP's cylindrical face prescribes.
+    Doing this per-layer (instead of all-layers-then-all-cuts) is the
+    key: an infinite-cylinder `cut(Circle)` applied to a short slab
+    merely grazes its top; applied to a tall slab it carves the
+    intended concave surface without reaching into the layers above.
+    """
     name = body['name']; slug = _slug(name)
     layers = body['layers']
+    lats = body.get('lateral_cuts', [])
+    hgs = body.get('hole_groups_axial', [])
+
+    # Match each saddle to the layer whose x-extent it matches (within 0.5 mm).
+    saddle_to_layer: list[int | None] = [None] * len(lats)
+    for si, lc in enumerate(lats):
+        if lc.get('start') is None or lc.get('end') is None:
+            continue
+        for li, layer in enumerate(layers):
+            (x0, _), (x1, _), _, _ = layer['profile']
+            if abs(lc['start'] - x0) < 0.5 and abs(lc['end'] - x1) < 0.5:
+                saddle_to_layer[si] = li
+                break
+
+    # Extrude height for each layer. Must be:
+    #   - ABOVE every saddle cylinder's lower arc at the body's y-edges,
+    #     so the cylinder cut reaches across the full layer top, and
+    #   - BELOW every saddle cylinder's upper arc, so the cut doesn't
+    #     leave a "shelf" of material above the cylinder.
+    # The first constraint gives a small number (typ. 6-12 mm for rail-
+    # sized parts); the second gives a very large number (z_c + r, ~256
+    # for the SWQ8 rail). Any value in between works. We pick
+    # body_z_top + 5 mm — comfortably above any real layer top but far
+    # below the cylinder tops, so the resulting shapes are what the
+    # STEP intended: concave-topped slabs, no stray top shelves.
+    body_z_top = 0.0
+    for layer in layers:
+        body_z_top = max(body_z_top, layer['z_base'] + layer['thickness'])
+    tall_height = body_z_top + 5.0
+
+    # --- Params ---
     params = []
     for i, layer in enumerate(layers, 1):
         (x0, y0), (x1, _), (_, y1), _ = layer['profile']
@@ -792,11 +912,13 @@ def _emit_extrude_cadpy(body, source_step: str) -> str:
             (f'L{i}_x1', f'{x1:.3f}', ''),
             (f'L{i}_y0', f'{y0:.3f}', ''),
             (f'L{i}_y1', f'{y1:.3f}', ''),
-            (f'L{i}_t',  f'{layer["thickness"]:.3f}', ''),
+            (f'L{i}_t',  f'{layer["thickness"]:.3f}', 'original slab thickness (pre-carve)'),
             (f'L{i}_z0', f'{layer["z_base"]:.3f}', ''),
         ]
+    params.append(('tall', f'{tall_height:.3f}',
+                   'extrude height for each layer — top is carved to final '
+                   'z by the saddle cuts; this just needs to be big enough'))
 
-    hgs = body.get('hole_groups_axial', [])
     for i, hg in enumerate(hgs):
         prefix = 'hole' if i == 0 else f'hole{i + 1}'
         params.append((f'{prefix}_dia', f'{2 * hg["radius_mm"]:.3f}', ''))
@@ -810,30 +932,32 @@ def _emit_extrude_cadpy(body, source_step: str) -> str:
             params.append((f'{prefix}_x{j}', f'{hx:.3f}', ''))
             params.append((f'{prefix}_y{j}', f'{hy:.3f}', ''))
 
-    # Lateral cut params (saddle etc.) — one block per cut group.
-    lats = body.get('lateral_cuts', [])
-    for i, lc in enumerate(lats, 1):
+    for si, lc in enumerate(lats, 1):
+        if saddle_to_layer[si - 1] is None:
+            continue
         u, v = lc['center_uv']
         params += [
-            (f'sad{i}_r', f'{lc["radius_mm"]:.3f}', f'{lc["axis_dir"]}-axis lateral cut radius'),
-            (f'sad{i}_u', f'{u:.3f}', 'center in sketch plane (axis-perp coord 1)'),
-            (f'sad{i}_v', f'{v:.3f}', 'center in sketch plane (axis-perp coord 2)'),
+            (f'sad{si}_r', f'{lc["radius_mm"]:.3f}', f'{lc["axis_dir"]}-axis lateral cut radius'),
+            (f'sad{si}_u', f'{u:.3f}', 'center in sketch plane (axis-perp coord 1)'),
+            (f'sad{si}_v', f'{v:.3f}', 'center in sketch plane (axis-perp coord 2)'),
+            (f'sad{si}_a', f'{lc["start"]:.3f}', 'start along axis'),
+            (f'sad{si}_b', f'{lc["end"]:.3f}', 'end along axis'),
         ]
-        if lc['start'] is not None and lc['end'] is not None:
-            params += [
-                (f'sad{i}_a', f'{lc["start"]:.3f}', 'start along axis'),
-                (f'sad{i}_b', f'{lc["end"]:.3f}',   'end along axis'),
-            ]
 
+    # --- Body text ---
     L = _emit_header(name, slug, source_step)
     L += _emit_params_dict(name, params)
 
-    L.append(f'# Layered extrude: {len(layers)} stacked rectangular slab(s).')
-    L.append('# Each layer\'s outline is the XY bbox of points at that Z level.')
-    L.append('# Non-rectangular layer outlines (other than the lateral cuts below) are NOT captured yet.')
+    L.append(f'# {len(layers)} stacked layer(s). Each extrudes TALL (to z={tall_height:.0f}),')
+    L.append(f'# then its matching saddle cut carves the concave top. L1 gets the')
+    L.append(f'# full-length saddle (r=125.2 on the dewshield rail), L2 gets the')
+    L.append(f'# middle-only saddle (r=120), etc. Step height comes from the')
+    L.append(f'# L{{i}}_z0 base offsets; concave curvature comes from sad{{i}}_r.')
+    L.append('')
     for i, layer in enumerate(layers, 1):
-        z_top = layer['z_base'] + layer['thickness']
-        L.append(f'# Layer {i}: z ∈ [{layer["z_base"]:.3f}, {z_top:.3f}]')
+        z_top_orig = layer['z_base'] + layer['thickness']
+        L.append(f'# Layer {i}: z_base = {layer["z_base"]:.3f}, '
+                 f'original slab top was {z_top_orig:.3f} (pre-carve)')
         layer_name = 'base' if i == 1 else f'layer_{i}'
         plane_arg = "'XY'" if i == 1 and layer['z_base'] == 0 \
             else f"OffsetPlane(base='XY', distance='L{i}_z0')"
@@ -842,11 +966,43 @@ def _emit_extrude_cadpy(body, source_step: str) -> str:
         L.append(f"    ('L{i}_x1', 'L{i}_y0'),")
         L.append(f"    ('L{i}_x1', 'L{i}_y1'),")
         L.append(f"    ('L{i}_x0', 'L{i}_y1'),")
-        L.append(f"], height='L{i}_t')")
+        L.append(f"], height='tall')")
         L.append('')
 
-    # Axial bore cuts — anchor the sketch plane at the top of layer 1 since the
-    # bolt pattern was measured relative to it; the cut cylinder extends down.
+        # Saddles matched to this layer — emitted immediately so the
+        # cylinder carves THIS layer's top, not the next layer's body.
+        for si, lc in enumerate(lats, 1):
+            if saddle_to_layer[si - 1] != i - 1:
+                continue
+            base = 'YZ' if lc['axis_dir'] == 'X' else 'XZ'
+            dist_expr = f'sad{si}_a'
+            depth_expr = f'sad{si}_b - sad{si}_a'
+            cov = lc.get('arc_coverage_deg')
+            cov_txt = f' arc={cov:.1f}°' if cov is not None else ''
+            L.append(f'# Lateral cut {si}: r={lc["radius_mm"]:.3f} cylinder carves '
+                     f'layer {i}\'s top concave.{cov_txt}')
+            L.append('d.cut(')
+            L.append(f"    name={'saddle' if si == 1 else f'saddle_{si}'!r},")
+            L.append(f"    on=OffsetPlane(base={base!r}, distance={dist_expr!r}),")
+            L.append('    sketch=[')
+            L.append(f"        Circle(center=({f'sad{si}_u'!r}, {f'sad{si}_v'!r}), "
+                     f"radius={f'sad{si}_r'!r}),")
+            L.append('    ],')
+            L.append(f"    depth={depth_expr!r},")
+            L.append(')')
+            L.append('')
+
+    unmatched = [si for si, m in enumerate(saddle_to_layer, 1) if m is None and lats[si - 1].get('start') is not None]
+    if unmatched:
+        L.append(f'# NOTE: {len(unmatched)} lateral cylindrical face(s) had no')
+        L.append('# x-extent match to any layer and were skipped:')
+        for si in unmatched:
+            lc = lats[si - 1]
+            L.append(f'#   #{si}: {lc["axis_dir"]}-axis r={lc["radius_mm"]:.3f}, '
+                     f'x=[{lc.get("start"):.3f}, {lc.get("end"):.3f}]')
+        L.append('')
+
+    # Axial bores (bolt holes) — anchor at L1's original top, z = L1_z0 + L1_t.
     for i, hg in enumerate(hgs):
         prefix = 'hole' if i == 0 else f'hole{i + 1}'
         cut_name = 'bolt_holes' if i == 0 else f'{prefix}_holes'
@@ -861,30 +1017,6 @@ def _emit_extrude_cadpy(body, source_step: str) -> str:
             cx = f'{prefix}_x{j+1}'
             cy = f'{prefix}_y{j+1}'
             L.append(f"        Circle(center=({cx!r}, {cy!r}), radius={rd_expr!r}),")
-        L.append('    ],')
-        L.append(f"    depth={depth_expr!r},")
-        L.append(')')
-        L.append('')
-
-    # Lateral cuts (e.g. the rail's concave saddle mating the ring OD).
-    for i, lc in enumerate(lats, 1):
-        # sketch plane is perpendicular to the cut axis. For axis=X → YZ plane;
-        # for axis=Y → XZ plane. Circle center is (u, v) in that plane.
-        base = 'YZ' if lc['axis_dir'] == 'X' else 'XZ'
-        if lc['start'] is not None and lc['end'] is not None:
-            dist_expr = f'sad{i}_a'
-            depth_expr = f'sad{i}_b - sad{i}_a'
-        else:
-            dist_expr = '0'
-            depth_expr = '1000   # TODO: axis span not measured from STEP'
-        L.append(f'# Lateral cut {i}: {lc["axis_dir"]}-axis cylinder, r={lc["radius_mm"]:.3f}, '
-                 f'from {lc["axis_dir"]}={lc["start"]} to {lc["end"]}.')
-        L.append('d.cut(')
-        L.append(f"    name={'saddle' if i == 1 else f'saddle_{i}'!r},")
-        L.append(f"    on=OffsetPlane(base={base!r}, distance={dist_expr!r}),")
-        L.append('    sketch=[')
-        L.append(f"        Circle(center=({f'sad{i}_u'!r}, {f'sad{i}_v'!r}), "
-                 f"radius={f'sad{i}_r'!r}),")
         L.append('    ],')
         L.append(f"    depth={depth_expr!r},")
         L.append(')')

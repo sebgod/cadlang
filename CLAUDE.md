@@ -55,13 +55,14 @@ Reverse direction (optional):
 
 ```
 cadlang/
-├── cadlang.py            # Design class + STL/Fusion backends + `cadlang build` CLI
+├── cadlang.py            # Design class + STL/Fusion backends + `cadlang build` / `cadlang gui` CLI
 ├── stepimport.py         # STEP reader + feature recogniser + .cad.py emitter
-├── assembly.py           # YAML assembly loader + mate solver + combined STL
-├── CLAUDE.md             # this file — generic language reference
-├── README.md             # user-facing docs
-├── ROADMAP.md            # longer-term direction / planned features
-├── FOLLOW_UP.md          # open questions / TODOs across the tooling
+├── assembly.py           # YAML assembly loader + mate solver + always-on intersection check
+├── gui.py                # local web UI (stdlib HTTP server + three.js viewer)
+├── tests/                # pytest suite — importer + mate-solver + geometry pipeline
+├── CLAUDE.md             # this file — contributor/agent reference
+├── README.md             # user-facing quick start
+├── ROADMAP.md            # direction + open follow-ups across the tooling
 ├── requirements.txt      # pinned minor versions
 └── example-project/<name>/
     ├── project.cadlang        # manifest — `cadlang build` entry point
@@ -267,6 +268,22 @@ Assumes a single global coordinate frame — nested SHAPE_REPRESENTATION
 transforms are not resolved yet. True for typical single-body Fusion
 exports.
 
+### Generated `.g.cad.py` files are NOT edit targets
+
+The `.g.` infix marks a file as produced by the importer. **Never** hand-edit
+a `.g.cad.py` to fix a geometry problem — the next `stepimport` run (or
+`cadlang build`) overwrites it. If the rail's step is wrong, the ring is
+missing a cut, or a lateral saddle carves too deep, the fix goes in
+`stepimport.py`, and the output is refreshed by re-running the import.
+
+If a body genuinely needs hand-tuning that the importer will never be
+able to derive, promote it: copy `foo.g.cad.py` → `foo.cad.py` (drop the
+`.g.`), and either remove the `import:` step for it from
+`project.cadlang` or point the import `name:` somewhere else. The
+non-`.g.` file is then a normal hand-written part, tracked in git,
+re-runnable directly.
+
+
 ## How to add a new part
 
 1. Copy an existing `.cad.py` as a starting template, or import a STEP
@@ -352,6 +369,49 @@ computes rigid 4×4 transforms by aligning interface frames (bolt-pair
 midpoint + axes). Legacy `pose:` / `circular:` per-part specs still work
 for parts that don't declare interfaces.
 
+### Bolt axis direction convention
+
+`axis` in a `bolt_pair` interface is **the bolt direction from head to
+tip**. The part body sits on the **head side** of the bolt plane.
+
+In practice: picture the bolt physically. The head is on the part
+you're looking at now; the tip is sticking out into whatever mates on
+the other side. Whichever way the head→tip arrow points, that's `axis`.
+
+If the mated render comes out "flipped" — raised middle facing the
+wrong way, the body outside the ring instead of inside — negate the
+axis sign on this side's `bolt_pair`. Don't swap `positions`; don't
+touch the other side.
+
+The `tabbed_hole_stack` interface internally uses radial-outward as its
+axis convention (bolt tip pointing away from ring axis, head at the ring
+OD). A `bolt_pair` mated to it must therefore declare its axis so that
+head→tip points the same way: for a rail whose raised mating face is at
+rail-local +Z and whose bolt head would sit on the outer (+Z) side of
+the ring's tab, `axis: [0, 0, -1]`.
+
+### Intersection check (always on)
+
+Every `cadlang build` runs a pair-wise CSG intersection check between
+placed instances. AABB pre-filter keeps disjoint-pair cost to
+microseconds; only bbox-overlapping pairs pay a manifold3d boolean.
+
+- **Mated pairs** (any two instances connected by an entry in `mates:`)
+  have a generous 1500 mm³ threshold — a bolted joint legitimately
+  overlaps by a few hundred mm³ where the threaded insert sits inside
+  the ring wall.
+- **Non-mated pairs** have a 1 mm³ threshold — anything more is a
+  modelling error.
+
+Output goes to `<name>_intersections.json` next to the assembly STL,
+plus a per-pair stdout warning. The GUI reads that JSON when you select
+an assembly in the tree and paints the offending instances red. A
+"nothing unexpected" pass prints `intersection check: OK`.
+
+Per-instance STLs are also emitted under `<name>_parts/<slot>_<n>.stl`
+so the viewer (and anyone else) can inspect / color individual bodies.
+The combined `<name>.stl` is unchanged — still what the slicer eats.
+
 ## How to extend cadlang
 
 Adding a feature kind (e.g. a new `pocket()` op):
@@ -393,7 +453,7 @@ the new `on` branch, and make sure `_emit_cut` can render it in Fusion
 1. `cd example-project/<any>` and run `python ../../cadlang.py build` — the
    whole pipeline (STEP import → per-part emit → assembly) should succeed
    end-to-end, and the combined STL should be watertight-ish (concatenated,
-   not CSG-merged; see FOLLOW_UP).
+   not CSG-merged; see ROADMAP).
 2. Round-trip at least one hand-written part — re-run its `.cad.py` and
    confirm the STL is watertight and volume is in the ballpark of a hand
    calculation.

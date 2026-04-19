@@ -28,7 +28,17 @@ YAML schema (v2)
           positions:                   # part-local coordinates
             - [x1, y1, z1]
             - [x2, y2, z2]
-          axis: [ax, ay, az]           # bolt-axis direction in part-local frame
+          axis: [ax, ay, az]           # bolt direction: HEAD → TIP.
+                                       # Convention: the part body sits on
+                                       # the HEAD side of the bolt plane.
+                                       # For a rail whose raised mating
+                                       # surface faces the ring from the
+                                       # inside, with bolts inserted from
+                                       # outside, the tip points AWAY from
+                                       # the rail body, so `axis` = outward
+                                       # normal of the rail's mating face.
+                                       # Flip sign to flip which side of
+                                       # the bolt plane the body occupies.
 
         <interface_name>:
           kind: tabbed_hole_stack      # 4 tabs × 4 holes on a ring OD (say)
@@ -77,6 +87,7 @@ Notes
 """
 from __future__ import annotations
 import argparse
+import json
 import math
 import re
 import subprocess
@@ -439,7 +450,10 @@ def emit(assembly: dict, yaml_dir: Path, regenerate: bool = False):
 
     transforms = solve_poses(assembly)
 
-    combined_meshes = []
+    # Place every instance, keep them as independent meshes so we can
+    # (a) emit per-instance STLs for the GUI's per-part coloring, and
+    # (b) pair-check intersections without having to segment a combined mesh.
+    placed: list[dict] = []   # [{slot, instance, mesh, transform}]
     for slot, spec in assembly['parts'].items():
         src_path = (yaml_dir / spec['source']).resolve()
         if not src_path.exists():
@@ -451,11 +465,50 @@ def emit(assembly: dict, yaml_dir: Path, regenerate: bool = False):
             T = transforms[(slot, i)]
             mesh = base_mesh.copy()
             mesh.apply_transform(T)
-            combined_meshes.append(mesh)
+            placed.append({'slot': slot, 'instance': i, 'mesh': mesh, 'transform': T})
             tag = f'[{i}]' if count > 1 else ''
             print(f'[assembly] placed {slot}{tag}')
 
-    combined = trimesh.util.concatenate(combined_meshes)
+    # Per-instance STLs, one file per placed instance.  Filename convention:
+    # `<slug>_parts/<slot>_<instance>.stl`.  The GUI uses these to color
+    # individual instances; the combined STL is still emitted below for
+    # existing consumers (slicer, Windows 3D Viewer, etc.).
+    parts_dir = yaml_dir / f'{slug}_parts'
+    parts_dir.mkdir(exist_ok=True)
+    # Clear stale instance STLs so a removed part doesn't linger on disk.
+    for existing in parts_dir.glob('*.stl'):
+        existing.unlink()
+    for p in placed:
+        key = _instance_key(p['slot'], p['instance'])
+        (parts_dir / f'{key}.stl').write_bytes(b'')  # touch so we can path-check
+        p['mesh'].export(str(parts_dir / f'{key}.stl'))
+
+    # Intersection check — always on.  Every pair whose axis-aligned bboxes
+    # overlap pays one CSG intersection; disjoint pairs cost ~microseconds.
+    #
+    # A real bolted joint necessarily has some volumetric overlap (the
+    # threaded insert sits inside the ring wall), so mated pairs get a
+    # generous threshold. Non-mated pairs intersecting at all is a red
+    # flag — keep them strict. Distinction comes from the YAML `mates:`
+    # declarations: any pair referenced there is "expected to touch".
+    mated_pairs = _mated_pair_keys(assembly)
+    intersections = _check_intersections(placed, mated_pairs=mated_pairs)
+    inter_path = yaml_dir / f'{slug}_intersections.json'
+    inter_path.write_text(json.dumps({
+        'name': name,
+        'instances': [_instance_key(p['slot'], p['instance']) for p in placed],
+        'intersections': intersections,
+    }, indent=2))
+    if intersections:
+        print(f'cadlang[assembly] WARNING: {len(intersections)} unexpected '
+              f'intersecting pair(s) — see {inter_path.name}')
+        for it in intersections:
+            tag = ' (mated, above joint threshold)' if it.get('mated') else ''
+            print(f'  {it["a"]}  ∩  {it["b"]}  =  {it["volume_mm3"]:.2f} mm^3{tag}')
+    else:
+        print('cadlang[assembly] intersection check: OK (no unexpected overlaps)')
+
+    combined = trimesh.util.concatenate([p['mesh'] for p in placed])
     out_stl = yaml_dir / f'{slug}.stl'
     out_png = yaml_dir / f'{slug}_preview.png'
     combined.export(str(out_stl))
@@ -464,6 +517,98 @@ def emit(assembly: dict, yaml_dir: Path, regenerate: bool = False):
     _render_preview(combined, out_png, title=name)
     print(f'cadlang[assembly] wrote {out_png}')
     return combined
+
+
+def _instance_key(slot: str, instance: int) -> str:
+    return f'{slot}_{instance}'
+
+
+def _mated_pair_keys(assembly: dict) -> set[tuple[str, str]]:
+    """Return the set of {(instance_key_a, instance_key_b)} where the two
+    instances are connected by an entry in the YAML `mates:` list. Used
+    to relax the intersection threshold for bolted joints (which have
+    legitimate overlap at the insert bore).
+    """
+    parts = assembly.get('parts') or {}
+    mates = assembly.get('mates') or []
+    out: set[tuple[str, str]] = set()
+    for m in mates:
+        slot_a = m.get('part')
+        to = m.get('to')
+        if not slot_a or not isinstance(to, dict):
+            continue
+        slot_b = to.get('part')
+        if not slot_b:
+            continue
+        count_a = int((parts.get(slot_a) or {}).get('count', 1))
+        count_b = int((parts.get(slot_b) or {}).get('count', 1))
+        # mates can be per-instance (bound to {i}); pair every instance of a
+        # with every instance of b that the mate could connect. For simple
+        # 1:1 mates (tab:"{i}") this is permissive — the joint threshold is
+        # what gates the false-positive rate, not this set.
+        for ia in range(count_a):
+            for ib in range(count_b):
+                ka = _instance_key(slot_a, ia)
+                kb = _instance_key(slot_b, ib)
+                out.add(tuple(sorted([ka, kb])))
+    return out
+
+
+def _check_intersections(placed, mated_pairs=None,
+                         non_mated_threshold_mm3: float = 1.0,
+                         mated_joint_threshold_mm3: float = 1500.0):
+    """Pair-wise CSG intersection check. Returns list of
+    `{a, b, volume_mm3, mated}` for overlaps above the appropriate
+    threshold.
+
+    * Non-mated pair: threshold is tiny (1 mm³ swallows manifold3d's
+      numerical noise); any more than that is a modelling error.
+    * Mated pair (declared in `mates:`): threshold is generous (1500 mm³)
+      — a bolted joint legitimately overlaps by a few hundred mm³ at the
+      insert bore. Only catastrophic overlaps (a part flipped the wrong
+      way so its body sits entirely inside another) exceed it.
+
+    AABB pre-filter keeps disjoint-pair cost at ~microseconds.
+    """
+    mated = mated_pairs or set()
+    out = []
+    n = len(placed)
+    for i in range(n):
+        ai = placed[i]
+        bbox_i = ai['mesh'].bounds
+        for j in range(i + 1, n):
+            bj = placed[j]
+            bbox_j = bj['mesh'].bounds
+            if (bbox_i[1][0] < bbox_j[0][0] or bbox_j[1][0] < bbox_i[0][0] or
+                bbox_i[1][1] < bbox_j[0][1] or bbox_j[1][1] < bbox_i[0][1] or
+                bbox_i[1][2] < bbox_j[0][2] or bbox_j[1][2] < bbox_i[0][2]):
+                continue
+            key_a = _instance_key(ai['slot'], ai['instance'])
+            key_b = _instance_key(bj['slot'], bj['instance'])
+            is_mated = tuple(sorted([key_a, key_b])) in mated
+            threshold = mated_joint_threshold_mm3 if is_mated else non_mated_threshold_mm3
+            try:
+                inter = trimesh.boolean.intersection([ai['mesh'], bj['mesh']])
+            except Exception as e:
+                print(f'[assembly] intersection check failed for '
+                      f'{key_a} vs {key_b}: {e}')
+                continue
+            # Guard against degenerate intersection results (a few coincident
+            # faces -> mesh has vertices/faces but zero volume, which makes
+            # trimesh's center_mass divide by zero and emit a RuntimeWarning).
+            if inter is None or inter.is_empty or len(inter.faces) == 0:
+                continue
+            with np.errstate(invalid='ignore', divide='ignore'):
+                vol = float(abs(inter.volume))
+            if not np.isfinite(vol) or vol < threshold:
+                continue
+            out.append({
+                'a': key_a,
+                'b': key_b,
+                'volume_mm3': vol,
+                'mated': is_mated,
+            })
+    return out
 
 
 def _render_preview(mesh, path: Path, title: str = ''):

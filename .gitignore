@@ -11,6 +11,14 @@ dist/
 *.g_preview.png
 *.g_fusion.py
 
+# Assembly per-instance STLs + intersection sidecar (always regenerated
+# from `cadlang build`; only the combined assembly .stl is tracked).
+*_parts/
+*_intersections.json
+
 # Local tooling
 .claude/settings.local.json
 resume.txt
+
+# pytest
+.pytest_cache/

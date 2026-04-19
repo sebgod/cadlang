@@ -27,6 +27,9 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
 [project.scripts]
 cadlang = "cadlang:main"
 
@@ -35,4 +38,4 @@ Homepage = "https://github.com/sebgod/cadlang"
 Repository = "https://github.com/sebgod/cadlang"
 
 [tool.setuptools]
-py-modules = ["cadlang", "assembly", "stepimport"]
+py-modules = ["cadlang", "assembly", "stepimport", "gui"]

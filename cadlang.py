@@ -597,9 +597,24 @@ def main(argv=None):
     b.add_argument('project', nargs='?', default=None,
                    help='path to a project.cadlang file or its directory; '
                         'defaults to searching upward from cwd')
+    g = sub.add_parser('gui', help='serve a local web UI to browse and rebuild parts')
+    g.add_argument('project', nargs='?', default=None,
+                   help='project path (same resolution as `build`)')
+    g.add_argument('--host', default='127.0.0.1')
+    g.add_argument('--port', type=int, default=8765,
+                   help='port to bind (default: 8765; pass 0 for ephemeral)')
+    g.add_argument('--no-browser', action='store_true',
+                   help="don't auto-open the browser")
+    g.add_argument('--no-reload', action='store_true',
+                   help="don't auto-restart on cadlang source edits")
     args = p.parse_args(argv[1:])
     if args.cmd == 'build':
         return build_project(args.project)
+    if args.cmd == 'gui':
+        import gui
+        return gui.serve(args.project, host=args.host, port=args.port,
+                         open_browser=not args.no_browser,
+                         reload=not args.no_reload)
     return 0
 
 

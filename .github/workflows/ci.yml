@@ -25,11 +25,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install cadlang
-        run: pip install .
+      - name: Install cadlang (with dev extras)
+        run: pip install .[dev]
 
       - name: cadlang --help
         run: cadlang --help
+
+      - name: Run tests
+        run: pytest tests/ -v
 
       - name: Round-trip hand-written part
         run: python example-project/SWQ8-Dewshield-Holder/parts/overlap_ring.cad.py

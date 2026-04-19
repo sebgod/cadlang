@@ -1,160 +1,178 @@
 # cadlang — roadmap
 
-Longer-term direction for the DSL. Near-term tasks (tied to whatever
-project is currently using cadlang) live in `STATE.md`.
+Longer-term direction plus open follow-ups across the tooling. One list
+so there's exactly one place to check "what's next". Near-term work tied
+to a specific project still lives in the `STATE.md` inside that
+project's directory.
 
-This file is for:
-- Sketching out the shape of bigger features before implementing them.
-- Giving a future Claude session enough context to pick up the design
-  direction.
+Conventions:
+- **Shipped** — already implemented and exercised.
+- **Next up** — queued work, roughly in priority order per section.
+- **Not started** — acknowledged but nobody's scoped it yet.
 
 ---
 
 ## Where we are today
 
 cadlang v0.2 covers:
-- `revolve(...)` — axisymmetric bodies
-- `extrude(...)` — prismatic bodies on `XY` or `OffsetPlane('XY', ...)`
+- `revolve(...)` — axisymmetric bodies.
+- `extrude(...)` — prismatic bodies on `XY` or `OffsetPlane('XY', ...)`.
 - `cut(...)` on top-face `Rect`s, YZ-offset `Circle`s (radial bores +
-  saddle spans), XY-offset `Circle`s (axial through-holes), with optional
-  circular patterns
-- Watertight STL via `manifold3d` CSG + a matplotlib preview (ring/flat
-  auto-detect)
-- Fusion 360 parametric script with `params` flowing into userParameters
-- STEP reader + emitter (`stepimport.py`) producing starter `.cad.py` per
-  body, with hole depth measured from trim geometry and lateral saddle
-  cuts auto-detected
-
-It is solid for single parts. The remaining gaps:
-
-1. **Finer feature detection** in the importer — non-rectangular outlines,
-   bosses on revolves, fillets — §3.
-2. **Assembly description** — a declarative file that references multiple
-   `.cad.py` parts and captures how they fit. Without it, shared
-   dimensions get duplicated across parts and drift silently (§4).
-
----
-
-## 2. Real CSG — ✅ done
-
-Landed on x64 with `manifold3d`. `_build_mesh` uses `Manifold.revolve`,
-`Manifold.extrude`, `Manifold.cylinder`, and boolean `+`/`-` for union/
-difference. No hand-rolled mesh stitching.
-
-Follow-ups still open:
-- `hole(...)` sugar method on `Design` that wraps the common radial-bore
-  cut pattern (nice-to-have, not blocking anything).
-- Fillets and chamfers as proper ops rather than baked into revolve
-  profiles.
+  shallow saddle grooves), XY-offset `Circle`s (axial through-holes),
+  with optional circular patterns.
+- Watertight STL via `manifold3d` CSG + a matplotlib preview
+  (ring/flat auto-detect).
+- Fusion 360 parametric script with `params` flowing into
+  userParameters.
+- STEP reader + emitter (`stepimport.py`) producing starter `.cad.py`
+  per body. Every detected cylindrical face is emitted faithfully as a
+  `cut(Circle)`; narrow-arc coverage is computed from face edge
+  vertices and surfaced as metadata but no longer gates emission.
+- Assembly layer v1 (`assembly.py`) — YAML with `interfaces:` and
+  `mates:`, solved via frame alignment. Per-instance STL output,
+  always-on CSG intersection check that distinguishes mated joints
+  from modelling errors.
+- `cadlang gui` — local web UI (three.js viewer, tree of parts and
+  assemblies, rebuild buttons, hot-reload on source edits,
+  intersection-highlight coloring).
+- Tests (`tests/`, pytest, 24 tests, ~0.5 s) — Tier 1 importer +
+  mate-solver analysis, Tier 2 geometry pipeline (volumes / bbox /
+  watertight).
 
 ---
 
-## 3. Importer: STL / STEP → cadlang
+## Core DSL (`cadlang.py`)
 
-Goal: point it at an existing CAD file and get a starter `.cad.py` that
-describes the same geometry in cadlang.
+**Next up:**
+- Fillets + chamfers as first-class `fillet(...)` / `chamfer(...)` ops.
+  Today they're baked into the revolve profile.
+- `hole(...)` sugar on `Design` wrapping the common radial-bore cut.
+- Non-`XZ` revolve planes and non-`Z` revolve axes.
+- `cut(OffsetPlane('XZ'), …)` branch in the STL backend (Fusion
+  already handles it via `_PLANE_ATTR`).
+- Bounded lateral cut primitive — either a polyline/arc lateral sketch
+  or a `cut` that accepts a z-range clamp. Blocks faithful emission of
+  over-carving saddle patches from the importer (see below).
+- True CSG merge in assembly output — right now the combined STL is
+  `trimesh.util.concatenate`-d; shells stay distinct. Swap to a
+  manifold3d union once the bodies are known-watertight.
 
-### STEP → cadlang — partially done
+---
 
-Shipped in `stepimport.py`:
+## STEP importer (`stepimport.py`)
+
+**Shipped:**
 - AP203/AP214 text parser (records + arg trees, no CAD kernel).
 - Per-brep walk: classifies each `MANIFOLD_SOLID_BREP` as revolve or
   extrude.
 - Revolve body: extracts ID, OD, height, radial bore groups (incl.
   circular-pattern count via opposite-pair heuristic).
-- Extrude body: Z-level clustering of VERTEX_POINTs → stacked layers (bbox
-  rectangles per layer). Detects axial through-holes and lateral-axis
-  (saddle) cylinders, emits them as `cut(...)` calls.
-- Hole depth: measured from `CIRCLE` trim edges, with a fallback that
-  projects edge VERTEX_POINTs onto the cylinder axis when trims are
-  splines.
-- Emits one `<src>_partNNN.g.cad.py` per body (the `.g.` infix distinguishes
-  auto-generated sources from hand-written `.cad.py` files).
+- Extrude body: Z-level clustering of VERTEX_POINTs → stacked layers
+  (bbox rectangles per layer). Detects axial through-holes and
+  lateral-axis (saddle) cylinders.
+- Trim-aware saddle classification — each cylindrical face's angular
+  coverage is measured from edge-loop vertex points and attached to the
+  cut group as `arc_coverage_deg` / `narrow_arc` metadata.  Emission is
+  unconditional: every detected cylindrical face becomes a
+  `cut(Circle)` call so the output stays faithful to the STEP.
+- Hole depth from `CIRCLE` trim edges, fallback projecting edge
+  vertex points onto the cylinder axis when trims are B-splines.
 
-Still missing:
-- Non-rectangular layer outlines — extrude layers are bbox'd. Extract
-  real polygon outlines by walking face → loop → edge → vertex chains.
-- Bosses / outer-proud pads on revolves — planar features, not cylinders,
-  so the current revolve path misses them.
-- Top-face slots on imports — cadlang's `cut(d.top_face, Rect, Circular)`
-  exists but the importer doesn't detect sector slots.
-- Fillets / chamfers at import time — usually lost; leave a TODO comment
-  in the generated file.
-- Nested SHAPE_REPRESENTATION transforms — assumes a single global frame.
-
-### STL → cadlang — not started
-
-STL has no feature info; primitives must be fit. Principal-axis detection,
-RANSAC cylinder fits, plane fits, angular-sector anomaly detection for
-slots and bosses. Output the same `.cad.py` shape as the STEP path with
-confidence annotations. Harder and less critical than the STEP path.
-
-### CLI
-
-```
-python stepimport.py thing.step                  # report to stdout
-python stepimport.py thing.step -o parts/        # emit per-body .cad.py
-python stepimport.py thing.step -o parts/x.cad.py  # single-body file
-```
+**Next up:**
+- **z-level detector: ignore cylindrical-face trim vertices.** The
+  extrude classifier clusters every VERTEX_POINT in the brep by z to
+  find layer boundaries. But a saddle cylinder's trim arc has
+  endpoints at z values that are NOT planar-face corners — e.g. the
+  SWQ8 rail's sad1/sad2 cylinders contribute vertices at z≈11.22 that
+  the detector mis-reads as a third layer, creating a spurious "L2"
+  slab. It currently works out because sad1 then carves L2 away, but
+  only by accident. Fix: when collecting vertices for z-clustering,
+  reject those that only bound cylindrical / other non-planar faces.
+- Non-rectangular extrude-layer outlines — every slab is currently a
+  bbox rectangle. Walk face → loop → edge → vertex chains to extract
+  actual polygon outlines.
+- Tab bosses / outer-proud pads on revolves — planar features, not
+  cylinders, so the revolve path misses them (the SWQ8 ring's 4 tabs
+  at 0/90/180/270° currently come through as a uniform annulus).
+- Top-face slots on imports — cadlang has `cut(d.top_face, Rect,
+  Circular)`, the importer just doesn't detect sector slots.
+- Fillet / chamfer detection at import time. Usually lost at the
+  boundary; leave a TODO comment in the emitted `.g.cad.py`.
+- Face-normal orientation check (`ORIENTED_FACE` / `FACE_SURFACE`
+  direction flags) so lateral cylinders can be classified as concave
+  cuts vs convex kept surfaces. Today we always assume "lateral
+  cylinder ⇒ cut".
+- Derive the cut's depth directly from the trim's angular span rather
+  than inferring from cylinder+body geometry — makes the importer
+  independent of the heuristic 20% over-carve threshold.
+- Hole-depth fallback for B-spline trims can give odd depths; switch
+  to a face-boundary walk that rejects spline-only trims.
+- Nested `SHAPE_REPRESENTATION` transforms — the importer assumes one
+  global frame, fine for single-body Fusion exports but not for
+  multi-level assemblies.
 
 ---
 
-## 4. Assembly description — v1 shipped
+## STL importer — not started
 
-v1 is in: `assembly.py` parses YAML assemblies, resolves per-instance
-transforms via interface-based mates (bolt_pair ↔ tabbed_hole_stack), and
-emits a combined STL + preview. Dimensions for the dew-shield test case
-(`assemblies/dew_shield.yml`) come entirely from measured interface
-geometry — no hand-computed pose numbers in the YAML. Explicit `pose:` and
-`circular:` are still supported for parts without interfaces.
+STL has no feature info; primitives have to be fit. Principal-axis
+detection, RANSAC cylinder fits, plane fits, angular-sector anomaly
+detection for slots and bosses. Output the same `.g.cad.py` shape as
+the STEP path, with per-feature confidence annotations. Harder and
+less critical than the STEP path — only worth doing if a part arrives
+without a STEP.
 
-Remaining gaps in the assembly layer:
+---
 
-- **Dimension propagation / constraints** — YAML has no `constraints:` block
-  yet. Changing a rail bolt position in `_SWQ8_part002_.g.cad.py`'s params
-  will break the mate if the interface definition isn't kept in sync. A
-  `constraints:` block that injects values into each part's `params` at
-  assembly time would close this.
-- **More interface kinds** — `push_fit_inner`/`push_fit_outer`, `flat_face`,
-  `tube_od`/`tube_id`. Add per project as they're needed.
-- **Fusion assembly script** — combined STL only; no `<name>_fusion.py` yet
-  that creates components + rigid joints in Fusion.
-- **Interface definitions embedded in parts** — currently interfaces live
-  in the assembly YAML. Future: allow a sidecar `<name>.interfaces.yml` or
-  inline in `.cad.py` so each part carries its own mating contract.
-- **True boolean union** — parts are `trimesh.util.concatenate`-d, not
-  CSG-merged. Fine for visualisation; a proper merge would use manifold3d.
+## Assembly layer (`assembly.py`)
 
-The paragraphs below describe the shape of the full v2+ solution.
+**Shipped:**
+- YAML with `interfaces:` (bolt_pair, tabbed_hole_stack) + `mates:`,
+  solved via frame alignment. Legacy explicit `pose:` / `circular:` is
+  still supported.
+- Bolt-axis convention: `axis` = bolt head→tip, body on the head
+  side. Flip the sign to flip which side of the mating plane the body
+  ends up on.
+- Per-instance STL output under `<name>_parts/<slot>_<n>.stl` alongside
+  the combined STL.
+- Always-on CSG intersection check between placed instances (AABB
+  pre-filter, pair-wise manifold3d). 1500 mm³ threshold for mated pairs
+  — swallows the expected threaded-insert overlap at a bolted joint.
+  1 mm³ for non-mated pairs — any more is a modelling error. Writes
+  `<name>_intersections.json`; GUI reads it and paints offending
+  instances red.
 
-### Shape of the solution
+**Next up:**
+- `constraints:` block for dimension propagation — push a single
+  source-of-truth value (e.g. `rail_width`) into the `params` of every
+  referenced part before it runs.
+- More interface kinds: `push_fit_inner` / `push_fit_outer`,
+  `flat_face`, `tube_od` / `tube_id`, `bolt_circle`.
+- Fusion assembly script emitter — one `<name>_fusion.py` per assembly
+  creating components + rigid joints, so the whole thing opens in
+  Fusion at once.
+- Interface definitions embedded in parts — today they live in the
+  assembly YAML; a sidecar `<name>.interfaces.yml` or an in-`.cad.py`
+  API would let each part carry its own mating contract.
+- Cycle detection in the mate graph (today: rejected when progress
+  stalls, but the error message could be clearer).
+- Better error messages generally when a mate fails to resolve.
 
-Describe an assembly as a separate declarative file — likely **YAML**,
-since it's a pure description (no code execution). The assembly file
-references existing `.cad.py` parts and records:
-
-- which parts participate (and in what multiplicity / pattern)
-- which **interfaces** each part exposes (named mating features)
-- which pairs of interfaces are **mated** to each other
-- which **dimensions** are authoritative and flow downstream from their
-  source
-
-### Sketch of the format
+### Target shape for v2 (assembly constraints)
 
 ```yaml
-name: <assembly-name>
+name: <assembly>
 units: mm
 
 parts:
-  <slot_name>:
-    source: parts/<somepart>.cad.py
-    count: 4                      # optional — for patterned instances
-    pattern: {type: circular, axis: Z, count: 4}
+  <slot>:
+    source: parts/<name>.cad.py
+    count: 4
 
 interfaces:
-  <part_slot>:
-    <iface_name>:
-      kind: rail_tenon            # one of a starter library of kinds
+  <part_type>:
+    <iface>:
+      kind: rail_tenon      # richer kinds from the table below
       width:       <expr>
       thickness:   <expr>
       hole_pattern: [{z: 0}, {z: hole_spacing}]
@@ -163,88 +181,124 @@ mates:
   - parts: [<from>, <to>]
     via:   [<from>.<iface>, <to>.<iface>]
 
-# Dimensions with a single source of truth.
-constraints:
+constraints:                # push dims into parts at assembly time
   rail_width: 20.0
   some_part.notch_arc: "{rail_width} + 0.4"
 ```
 
-### Why a separate YAML instead of extending the Python DSL
+**Starter library of interface kinds**:
 
-- Clean separation: part files stay focused on the geometry of one thing;
-  assembly concerns (how things relate) live in their own layer.
-- Easy to diff and review — a pure description, no imports or execution
-  context.
-- Re-use: the same `.cad.py` can participate in multiple assemblies with
-  different mate contexts.
-- Tooling: `cadlang assembly <file.yml>` can validate mate compatibility,
-  push dimensions into the referenced part files' params, render a combined
-  STL, and emit a Fusion assembly script — without having to load and union
-  parts manually.
+| kind             | meaning                                                    |
+|------------------|------------------------------------------------------------|
+| `rail_tenon`     | rectangular protrusion, mates with `rail_mortise`          |
+| `rail_mortise`   | rectangular slot, accepts `rail_tenon` with clearance      |
+| `tube_od`        | cylindrical OD at a named face                             |
+| `tube_id`        | cylindrical ID at a named face (clamps onto `tube_od`)     |
+| `push_fit_outer` | cylindrical surface for press/slide fit + clearance spec   |
+| `push_fit_inner` | mating ID                                                  |
+| `bolt_circle`    | N holes in circular pattern (diameter, PCD, count)         |
+| `flat_face`      | flat surface for gluing / mating planes                    |
 
-### Interface types — starter library
-
-| kind            | meaning                                                            |
-|-----------------|--------------------------------------------------------------------|
-| `rail_tenon`    | rectangular protrusion, mates with `rail_mortise`                  |
-| `rail_mortise`  | rectangular slot, accepts `rail_tenon` with specified clearance    |
-| `tube_od`       | cylindrical OD at a named face                                     |
-| `tube_id`       | cylindrical ID at a named face (clamps onto `tube_od`)             |
-| `push_fit_outer`| cylindrical surface for press/slide fit (with clearance spec)      |
-| `push_fit_inner`| mating ID                                                          |
-| `bolt_circle`   | N holes in circular pattern (diameter, PCD, count)                 |
-| `flat_face`     | flat surface for gluing / mating planes                            |
-
-Each kind is a schema — a set of expected fields plus a compatibility rule
-with its counterpart kind. A mate validates compatibility and pushes
+Each kind is a schema. A mate validates compatibility and pushes
 dimensions from the authoritative side into the mating side's params.
 
-### Validation + emission pipeline
+**Rules of thumb:**
+- Source of truth per dimension: the tenon defines the nominal; the
+  mortise adds clearance. If both specify the same dimension, error.
+- Reject cyclic mate graphs at first; solve iteratively only if a
+  real case needs it.
+- Use `trimesh.transformations` for 4×4 composition; don't roll your
+  own linear algebra.
+- Cache meshes by parameter hash; assembly regenerations add up fast.
 
-```
-<assembly>.assembly.yml
-        │
-        ├── load referenced .cad.py files (don't run them yet)
-        ├── read interface definitions (either in YAML or in part files)
-        ├── resolve mates
-        │     • fit check: clearance, compat kinds, hole-pattern agreement
-        │     • push dimensions: mate-driven params overwrite part params
-        │     • cycle check: reject cyclic dimension flows (start strict)
-        ├── per part: emit .cad.py → STL + Fusion with driven params
-        └── combined outputs:
-              • <assembly>.stl       — all parts in assembly pose, one mesh
-              • <assembly>_fusion.py — components + joints in Fusion
-```
-
-### Rules of thumb
-
-- **Source of truth per dimension**: the tenon defines the nominal; the
-  mortise adds clearance. If both try to specify the same dimension, it's
-  an error.
-- **No cycles at first**: reject mate graphs that propagate constraints
-  cyclically. Solve iteratively only if a real case needs it.
-- **Coordinate frames**: use `trimesh.transformations` for 4×4 matrix
-  composition; do not roll your own linear algebra.
-- **Cache meshes** by parameter hash — assembly regenerations add up fast.
-
-### Scope for v1 of the assembly layer
-
-Pick the two or three interface kinds that the current real project needs
-(see `STATE.md`) and implement those end-to-end: schema, mate validation,
-dimension push. Add more kinds as new projects introduce them. Don't try
-to cover every shape up front.
+Implement the handful of interface kinds the current real project
+needs (see `STATE.md`). Add more as new projects introduce them.
 
 ---
 
-## 5. Suggested order of attack
+## Local GUI (`gui.py` + `cadlang gui`)
+
+**Shipped:**
+- stdlib HTTP server (default port 8765), three.js viewer via ESM
+  CDN, tree of parts + assemblies.
+- Camera toolbar (Fit / Iso / Top / Front / Right), Fusion-style MMB
+  pan, Z-up grid.
+- Rebuild buttons that run the same subprocesses the CLI would; log
+  panel with captured stdout/stderr.
+- Source tab showing the selected item's `.cad.py` or YAML (raw).
+- Hot-reload watcher on `gui.py`, `cadlang.py`, `assembly.py`,
+  `stepimport.py` — the browser tab survives restarts because the
+  port is stable.
+- Per-instance assembly loading with red coloring for instances that
+  appear in the intersections sidecar.
+
+**Next up:**
+- **Referenced-import viewer** — render the `.step` files that
+  `project.cadlang` pulls in, so you can visually diff against
+  cadlang's emitted STL. Two approaches worth comparing:
+  1. WASM in the browser (`occt-import-js`, OpenCascade compiled to
+     wasm, ~4 MB once-cached). Fetch the `.step` via `/files/`, pass
+     the ArrayBuffer to the loader, add the returned mesh to the
+     scene in a distinct tint. Zero server-side Python deps.
+  2. Server-side tessellation via `cadquery-ocp` / `build123d` /
+     FreeCAD CLI, converting STEP → STL at build time. Heavier
+     install but faster first render.
+  Start with (1) since the GUI philosophy is "stdlib server + ESM
+  CDN for client libs, no npm".
+- SSE-streamed rebuild output so 30+ second assembly builds don't
+  block the UI.
+- File watcher for auto-rebuild on `.cad.py` edits (not just server
+  auto-restart).
+- In-browser `.cad.py` editor (CodeMirror?), so the edit → rebuild
+  → view loop stays in one window.
+
+---
+
+## Project CLI (`cadlang build`)
+
+**Next up:**
+- Watch mode (rerun on `.cad.py` / `.yml` changes).
+- Validation step: every part in an assembly must have an anchor or a
+  reachable mate chain.
+- Step-level caching: skip rebuilds when source files haven't changed.
+
+---
+
+## Preview renderer
+
+**Next up:**
+- matplotlib `Poly3DCollection` depth-sorting struggles with
+  thin/flat parts; hole cutouts viewed straight-on can render with
+  their wall triangles overdrawing the face. Currently mitigated by
+  auto-swapping to three iso views for flat parts. Proper fix: swap
+  to a real 3D backend (trimesh's pyglet scene, or a tiny raytracer).
+- Assembly preview doesn't adapt to bbox shape the way the per-part
+  preview does.
+
+---
+
+## Documentation / housekeeping
+
+- `CLAUDE.md` feature coverage table grows with every new op; might
+  auto-generate it from the backend code someday.
+- `README.md` and `CLAUDE.md` overlap in places; they split roughly as
+  "user-facing short" vs "contributor/agent long" — keep that split,
+  deduplicate anything that drifts.
+
+---
+
+## Suggested order of attack
 
 1. **Whatever single-part work the current project needs** — see
-   `STATE.md`.
-2. **Assembly format** (§4) — as soon as there are two parts that share a
-   dimension, the assembly layer pays for itself. Start with the real
-   project as the first test case.
-3. **Importer polish** (§3 still-missing list) — as needed per actual
-   imports.
-4. **STL importer** — only if a part comes through without a STEP.
+   `STATE.md` inside the project directory.
+2. **Bounded-cut primitive** — unblocks faithful emission of the
+   over-carving lateral cylinders currently skipped by the importer.
+3. **Assembly `constraints:`** — the next lever for keeping a real
+   project's dimensions single-sourced.
+4. **Referenced-import viewer** — quality-of-life for visually
+   diffing cadlang output against its STEP source.
+5. **Importer polish** (non-rect outlines, tab bosses, fillets) — as
+   real imports demand it.
+6. **STL importer** — only if a part arrives STEP-less.
 
 Each step stays useful even if the next never happens.

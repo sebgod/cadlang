@@ -26,12 +26,13 @@ Pulls in `numpy`, `trimesh`, `matplotlib`, and `manifold3d` (the CSG kernel).
 
 ```
 cadlang/
-├── cadlang.py          # Design + STL/Fusion backends + `cadlang build` CLI
+├── cadlang.py          # Design + STL/Fusion backends + `cadlang build` / `cadlang gui` CLI
 ├── stepimport.py       # STEP reader + feature recogniser + .cad.py emitter
-├── assembly.py         # YAML assembly loader + mate solver + combined STL
-├── CLAUDE.md           # detailed pipeline + DSL reference (generic)
-├── ROADMAP.md          # longer-term direction
-├── FOLLOW_UP.md        # open questions / TODOs
+├── assembly.py         # YAML assembly loader + mate solver + intersection check
+├── gui.py              # local web UI (stdlib server + three.js viewer)
+├── tests/              # pytest suite — importer + mate-solver + geometry pipeline
+├── CLAUDE.md           # detailed pipeline + DSL reference (contributor/agent)
+├── ROADMAP.md          # direction + open follow-ups across the tooling
 ├── requirements.txt
 └── example-project/<name>/
     ├── project.cadlang         # the project manifest (`cadlang build` entry)
@@ -62,6 +63,27 @@ python parts/<some-part>.cad.py          # one hand-written part
 python assembly.py <some-assembly.yaml>  # one assembly
 python stepimport.py thing.step -o parts/  # one STEP import
 ```
+
+## Browse a project visually
+
+```
+cadlang gui                     # serves http://127.0.0.1:8765
+```
+
+Left-pane tree of parts + assemblies, three.js STL viewer, rebuild
+buttons, hot-reload on source edits, red-highlight on any assembly
+instances that intersect unexpectedly.
+
+## Run the tests
+
+```
+pip install .[dev]
+pytest tests/ -v
+```
+
+Tier 1 importer / mate-solver analysis runs in ms (no CSG); Tier 2
+geometry pipeline runs in ~500 ms (volumes + watertight). All 24 tests
+under 1 second.
 
 ## Importing an existing STEP
 
@@ -110,5 +132,8 @@ See `CLAUDE.md` for the full DSL reference and pipeline diagram.
   class op.
 - Importer emits bbox-rectangle outlines per extrude layer — curved or
   chamfered outlines lose shape.
-- Assembly layer (mating-aware description referencing multiple parts) is
-  the next big thing — see `ROADMAP.md §4`.
+- Lateral cylindrical saddles that would over-carve the body (e.g. the
+  dewshield rail's r=125.2 face) are skipped with a warning rather than
+  emitted, pending a bounded-cut primitive.
+
+See `ROADMAP.md` for direction and the full open-items list.

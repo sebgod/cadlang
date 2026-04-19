@@ -30,13 +30,25 @@ interfaces:
       tab_phase_deg: 0                   # first tab at phi=0
       hole_z: [5, 11.667, 18.333, 25]    # intrinsic z positions (bottom to top)
 
+  overlap_ring:                          # new hand-designed overlap ring (Ring A)
+    tabs:
+      kind: tabbed_hole_stack
+      radius: 125.0                      # ring_od/2 from overlap_ring.cad.py
+      tab_count: 4
+      tab_phase_deg: 0
+      hole_z: [5, 11.667]                # only 2 heat-insert bores per tab
+
   SWQ8_part002:                          # the support rail (in STEP-laid-flat pose)
     scope_end:
       kind: bolt_pair
       positions:
         - [-56.917, -155.2, 3.3]
         - [-50.25,  -155.2, 3.3]
-      axis: [0, 0, 1]                    # bolt direction = rail's local +Z
+      # Physical rail sits OUTSIDE the ring: L1 (flat face) against the
+      # ring's OD tab, L2 (raised middle) extending radially outward.
+      # With axis=+Z, rail-local +Z aligns with radial-outward so rail
+      # body lands at r ≥ ring OD and doesn't intrude into the ring ID.
+      axis: [0, 0, 1]
     sky_end:
       kind: bolt_pair
       positions:
@@ -53,7 +65,7 @@ parts:
     source: parts/SWQ8_part001.g.cad.py
 
   bottom_ring:
-    source: parts/SWQ8_part001.g.cad.py
+    source: parts/overlap_ring.cad.py
 
   upper_rails:
     source: parts/SWQ8_part002.g.cad.py
@@ -95,12 +107,13 @@ mates:
       tab: "{i}"
       holes: [0, 1]
 
-  # Bottom ring positioned by its tab[0]'s UPPER hole pair mating to lower_rails[0].scope_end.
+  # Bottom ring (overlap_ring) positioned by its tab[0]'s hole pair mating to
+  # lower_rails[0].scope_end. overlap_ring has only 2 holes per tab (z=5, 11.667).
   - part: bottom_ring
     from:
       interface: tabs
       tab: 0
-      holes: [2, 3]
+      holes: [0, 1]
     to:
       part: lower_rails
       instance: 0
