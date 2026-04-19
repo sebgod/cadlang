@@ -174,13 +174,21 @@ def _unit(v):
     return v / n if n > 0 else v
 
 
-def _frame_from_bolt_pair(positions, axis) -> dict:
+def _frame_from_bolt_pair(positions, axis, face_offset: float = 0.0) -> dict:
     """Build an orthonormal frame from a bolt pair.
 
     x = pair direction (from position 0 to position 1)
     z = bolt axis (normal of the plate)
     y = z × x
-    origin = midpoint of the pair.
+    origin = midpoint of the pair, offset to the part's MATING FACE.
+
+    `face_offset` is the signed distance from the bolt midpoint to the
+    mating face, measured along the axis direction. Positive places the
+    mating face in the +axis direction from the midpoint; negative
+    places it in the -axis direction. When two bolt_pair interfaces
+    each specify their mating face via face_offset, `_align_frames`
+    lands the faces flush — no overlap with the mating part. Default 0
+    preserves the legacy bolt-midpoint-to-bolt-midpoint alignment.
     """
     p0 = np.asarray(positions[0], dtype=float)
     p1 = np.asarray(positions[1], dtype=float)
@@ -189,8 +197,9 @@ def _frame_from_bolt_pair(positions, axis) -> dict:
     y = _unit(np.cross(z, x))
     # re-orthogonalise x so that (x, y, z) is exactly orthonormal
     x = _unit(np.cross(y, z))
+    origin = (p0 + p1) / 2 + float(face_offset) * z
     return {
-        'origin': (p0 + p1) / 2,
+        'origin': origin,
         'x': x,
         'y': y,
         'z': z,
@@ -205,7 +214,10 @@ def _evaluate_interface(iface_def: dict, selector: dict) -> dict:
     """
     kind = iface_def['kind']
     if kind == 'bolt_pair':
-        return _frame_from_bolt_pair(iface_def['positions'], iface_def['axis'])
+        return _frame_from_bolt_pair(
+            iface_def['positions'], iface_def['axis'],
+            face_offset=float(iface_def.get('face_offset', 0.0)),
+        )
 
     if kind == 'tabbed_hole_stack':
         radius = float(iface_def['radius'])
@@ -236,6 +248,113 @@ def _apply_transform_to_frame(T: np.ndarray, frame: dict) -> dict:
         'y': R @ frame['y'],
         'z': R @ frame['z'],
     }
+
+
+def _resolve_axis_overlap(T, from_frame_local, slot, inst,
+                          to_ref, mesh_loader, transforms, parts) -> np.ndarray:
+    """After frame alignment, shift the moving part along the mate's
+    axis by the minimum distance that eliminates volumetric overlap
+    with the mate's target part.
+
+    Method: measure the signed distance from each of the moving mesh's
+    vertices to the target mesh. Vertices with `sd < 0` are inside the
+    target. The magnitude of the deepest penetration, projected onto
+    the mate's axis direction, is how far along the axis the part has
+    to shift to become flush. AABB-disjoint is an early out.
+
+    AABB-projection is NOT used for the shift — it over-shifts for
+    parts that have thin regions at the contact plane (e.g. a stepped
+    rail whose L1 is 5.6 mm thick at the ring contact but whose L2
+    raised-middle bulges inward between rings). Signed distance gives
+    the actual minimum shift for real 3D geometry.
+    """
+    if to_ref is None:
+        return T
+    target_slot, target_inst = to_ref
+    if (target_slot, target_inst) not in transforms:
+        return T
+    moving_base = mesh_loader(slot)
+    target_base = mesh_loader(target_slot)
+    if moving_base is None or target_base is None:
+        return T
+
+    axis_world = np.asarray(T[:3, :3]) @ np.asarray(from_frame_local['z'], dtype=float)
+    axis_norm = float(np.linalg.norm(axis_world))
+    if axis_norm < 1e-12:
+        return T
+    axis_world = axis_world / axis_norm
+
+    moving = moving_base.copy(); moving.apply_transform(T)
+    target = target_base.copy(); target.apply_transform(transforms[(target_slot, target_inst)])
+
+    mb, tb = moving.bounds, target.bounds
+    if (mb[1][0] < tb[0][0] or tb[1][0] < mb[0][0] or
+        mb[1][1] < tb[0][1] or tb[1][1] < mb[0][1] or
+        mb[1][2] < tb[0][2] or tb[1][2] < mb[0][2]):
+        return T   # AABBs disjoint → no overlap possible
+
+    # `trimesh.proximity.signed_distance` is unreliable on watertight CSG
+    # meshes (returns large-magnitude negative values for points FAR outside
+    # the solid), so don't use it.  Instead:
+    #   1. find which moving-mesh vertices are genuinely inside the target
+    #      solid via `target.contains` (ray-parity test — robust for
+    #      watertight meshes);
+    #   2. from each of those vertices, ray-cast along the axis direction
+    #      to find the first target-surface hit — that's the distance the
+    #      vertex would need to shift along the axis to exit the solid;
+    #   3. take the max over all penetrating vertices as the required
+    #      shift, and apply that along the axis.
+    try:
+        inside = target.contains(moving.vertices)
+    except Exception:
+        return T
+
+    if not np.any(inside):
+        return T
+
+    inside_verts = np.asarray(moving.vertices[inside], dtype=float)
+
+    # We don't know a priori whether the moving part should shift in
+    # +axis or -axis to clear the target — it depends on which side of
+    # the target the moving part's bulk sits. Cast rays in both
+    # directions from each inside vertex, compute the exit distance,
+    # and pick whichever direction gives the smaller maximum shift
+    # (least displacement to clear).
+    def _max_exit(direction):
+        dirs = np.tile(direction, (len(inside_verts), 1))
+        try:
+            locs, idx, _ = target.ray.intersects_location(
+                ray_origins=inside_verts, ray_directions=dirs,
+                multiple_hits=False,
+            )
+        except Exception:
+            return None
+        if len(locs) == 0:
+            return None
+        best = 0.0
+        for loc, ri in zip(locs, idx):
+            d = float(np.dot(loc - inside_verts[ri], direction))
+            if d > best:
+                best = d
+        return best
+
+    plus = _max_exit(axis_world)
+    minus = _max_exit(-axis_world)
+
+    candidates = []
+    if plus is not None and plus > 1e-9:
+        candidates.append((plus, axis_world))
+    if minus is not None and minus > 1e-9:
+        candidates.append((minus, -axis_world))
+    if not candidates:
+        return T
+
+    # Smallest shift wins.
+    shift, direction = min(candidates, key=lambda p: p[0])
+
+    T_shift = np.eye(4)
+    T_shift[:3, 3] = shift * direction
+    return T_shift @ T
 
 
 def _align_frames(from_frame_local: dict, to_frame_world: dict) -> np.ndarray:
@@ -311,10 +430,22 @@ def _resolve_side(side, *, my_part_type, interfaces, context,
     raise ValueError(f'cannot understand mate side {side!r}')
 
 
-def solve_poses(assembly: dict) -> dict:
+def solve_poses(assembly: dict, mesh_loader=None) -> dict:
     """Resolve per-instance 4x4 transforms for every part in the assembly.
 
-    Returns a dict keyed by (slot_name, instance_index)."""
+    Returns a dict keyed by (slot_name, instance_index).
+
+    If `mesh_loader` is provided (callable `slot_name -> trimesh.Trimesh`
+    in that part's local frame), each mate's frame alignment is followed
+    by a constraint-resolution step that shifts the moving part along
+    the mate's bolt axis until its AABB no longer overlaps the target
+    part's AABB. That removes the "parts can clip through each other
+    along the free DOF" failure mode — the mate constrains 5 DOF
+    (position + rotation of the axis line), and this step uses the 6th
+    (translation along that line) to satisfy a geometric non-overlap
+    constraint. Without `mesh_loader`, legacy midpoint-to-midpoint
+    alignment is used.
+    """
     parts = assembly['parts']
     interfaces = assembly.get('interfaces') or {}
     mates = assembly.get('mates') or []
@@ -385,6 +516,11 @@ def solve_poses(assembly: dict) -> dict:
                     f'part being placed, not on another part'
                 )
             T = _align_frames(from_frame_local, to_frame)
+            if mesh_loader is not None:
+                T = _resolve_axis_overlap(
+                    T, from_frame_local, slot, inst,
+                    to_ref, mesh_loader, transforms, parts,
+                )
             transforms[(slot, inst)] = T
             progress = True
         remaining = still_pending
@@ -448,18 +584,24 @@ def emit(assembly: dict, yaml_dir: Path, regenerate: bool = False):
     slug = re.sub(r'[^A-Za-z0-9_]+', '_', name) or 'assembly'
     global_regen = bool(regenerate or assembly.get('regenerate', False))
 
-    transforms = solve_poses(assembly)
+    # Load every part's base mesh up-front so the solver can do
+    # constraint-based overlap resolution while it walks the mate graph.
+    base_meshes: dict = {}
+    for slot, spec in assembly['parts'].items():
+        src_path = (yaml_dir / spec['source']).resolve()
+        if not src_path.exists():
+            raise FileNotFoundError(f'part source for {slot!r}: {src_path}')
+        stl_path = _ensure_stl(src_path, regenerate=global_regen or spec.get('regenerate', False))
+        base_meshes[slot] = trimesh.load(str(stl_path))
+
+    transforms = solve_poses(assembly, mesh_loader=base_meshes.get)
 
     # Place every instance, keep them as independent meshes so we can
     # (a) emit per-instance STLs for the GUI's per-part coloring, and
     # (b) pair-check intersections without having to segment a combined mesh.
     placed: list[dict] = []   # [{slot, instance, mesh, transform}]
     for slot, spec in assembly['parts'].items():
-        src_path = (yaml_dir / spec['source']).resolve()
-        if not src_path.exists():
-            raise FileNotFoundError(f'part source for {slot!r}: {src_path}')
-        stl_path = _ensure_stl(src_path, regenerate=global_regen or spec.get('regenerate', False))
-        base_mesh = trimesh.load(str(stl_path))
+        base_mesh = base_meshes[slot]
         count = int(spec.get('count', 1))
         for i in range(count):
             T = transforms[(slot, i)]
@@ -556,17 +698,16 @@ def _mated_pair_keys(assembly: dict) -> set[tuple[str, str]]:
 
 def _check_intersections(placed, mated_pairs=None,
                          non_mated_threshold_mm3: float = 1.0,
-                         mated_joint_threshold_mm3: float = 1500.0):
+                         mated_joint_threshold_mm3: float = 1.0):
     """Pair-wise CSG intersection check. Returns list of
     `{a, b, volume_mm3, mated}` for overlaps above the appropriate
     threshold.
 
-    * Non-mated pair: threshold is tiny (1 mm³ swallows manifold3d's
-      numerical noise); any more than that is a modelling error.
-    * Mated pair (declared in `mates:`): threshold is generous (1500 mm³)
-      — a bolted joint legitimately overlaps by a few hundred mm³ at the
-      insert bore. Only catastrophic overlaps (a part flipped the wrong
-      way so its body sits entirely inside another) exceed it.
+    The constraint solver (`_resolve_axis_overlap` in `solve_poses`)
+    now eliminates axis-DOF overlaps during placement, so mated and
+    non-mated pairs share the same tight 1 mm³ threshold: any real
+    overlap is a modelling error. `mated_joint_threshold_mm3` is kept
+    separate for callers that want to loosen it, but defaults to tight.
 
     AABB pre-filter keeps disjoint-pair cost at ~microseconds.
     """

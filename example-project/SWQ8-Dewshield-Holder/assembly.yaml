@@ -44,17 +44,13 @@ interfaces:
       positions:
         - [-56.917, -155.2, 3.3]
         - [-50.25,  -155.2, 3.3]
-      # Physical rail sits OUTSIDE the ring: L1 (flat face) against the
-      # ring's OD tab, L2 (raised middle) extending radially outward.
-      # With axis=+Z, rail-local +Z aligns with radial-outward so rail
-      # body lands at r ≥ ring OD and doesn't intrude into the ring ID.
-      axis: [0, 0, 1]
+      axis: [0, 0, -1]
     sky_end:
       kind: bolt_pair
       positions:
         - [50.25,  -155.2, 3.3]
         - [56.917, -155.2, 3.3]
-      axis: [0, 0, 1]
+      axis: [0, 0, -1]
 
 parts:
   middle_ring:
