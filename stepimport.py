@@ -856,8 +856,47 @@ def _emit_revolve_cadpy(body, source_step: str) -> str:
         L.append(f"    pattern=Circular(axis='Z', count={hg['pattern_count']}),")
         L.append(')')
         L.append('')
+    L += _emit_measurements_revolve(body)
     L += _emit_footer(slug)
     return '\n'.join(L) + '\n'
+
+
+def _emit_measurements_revolve(body) -> list[str]:
+    """Emit a d.measurements(...) call surfacing ID/OD/height + hole-group
+    dimensions — shown in the GUI next to the STL. Rows with `anchor` fields
+    are drawn as 3D dimension lines in the viewer."""
+    L = ['# Labelled measurements — rendered in the cadlang GUI. `anchor`',
+         '# entries become 3D dimension lines in the viewer.',
+         'd.measurements(']
+    L.append("    ('Overall', {")
+    L.append("        'ID': {'value': 'ring_id',")
+    L.append("               'anchor': {'kind': 'diameter',")
+    L.append("                          'from': ['-ring_id/2', 0, 0],")
+    L.append("                          'to':   ['ring_id/2',  0, 0]}},")
+    L.append("        'OD': {'value': 'ring_od',")
+    L.append("               'anchor': {'kind': 'diameter',")
+    L.append("                          'from': ['-ring_od/2', 0, 0],")
+    L.append("                          'to':   ['ring_od/2',  0, 0]}},")
+    L.append("        'wall':   '(ring_od - ring_id) / 2',")
+    L.append("        'height': {'value': 'ring_h',")
+    L.append("                   'anchor': {'kind': 'linear',")
+    L.append("                              'from': ['ring_od/2', 0, 0],")
+    L.append("                              'to':   ['ring_od/2', 0, 'ring_h']}},")
+    L.append('    }),')
+    for i, hg in enumerate(body['hole_groups']):
+        prefix = 'hole' if i == 0 else f'hole{i + 1}'
+        title = 'Heat inserts (radial)' if i == 0 else f'Radial bores (group {i + 1})'
+        L.append(f"    ({title!r}, {{")
+        L.append(f"        'count': {hg['pattern_count']},")
+        L.append(f"        'Ø':     {prefix + '_dia'!r},")
+        L.append(f"        'depth': {prefix + '_depth'!r},")
+        for j in range(len(hg['z_positions'])):
+            zn = f'z{j + 1}'
+            L.append(f"        {zn!r}:    {prefix + '_' + zn!r},")
+        L.append('    }),')
+    L.append(')')
+    L.append('')
+    return L
 
 
 def _emit_extrude_cadpy(body, source_step: str) -> str:
@@ -1022,8 +1061,71 @@ def _emit_extrude_cadpy(body, source_step: str) -> str:
         L.append(')')
         L.append('')
 
+    L += _emit_measurements_extrude(body, saddle_to_layer)
     L += _emit_footer(slug)
     return '\n'.join(L) + '\n'
+
+
+def _emit_measurements_extrude(body, saddle_to_layer) -> list[str]:
+    """Emit a d.measurements(...) call surfacing the body bbox, per-layer
+    thicknesses, axial bore dims, and saddle radii."""
+    layers = body['layers']
+    lats = body.get('lateral_cuts', [])
+    hgs = body.get('hole_groups_axial', [])
+
+    xmin = min(l['profile'][0][0] for l in layers)
+    xmax = max(l['profile'][1][0] for l in layers)
+    ymin = min(l['profile'][0][1] for l in layers)
+    ymax = max(l['profile'][2][1] for l in layers)
+    z_bot = min(l['z_base'] for l in layers)
+    z_top = max(l['z_base'] + l['thickness'] for l in layers)
+
+    L = ['# Labelled measurements — rendered in the cadlang GUI. `anchor`',
+         '# entries become 3D dimension lines in the viewer.',
+         'd.measurements(']
+    L.append("    ('Overall', {")
+    L.append(f"        'length (x)': {{'value': {xmax - xmin:.3f},")
+    L.append(f"                        'anchor': {{'kind': 'linear',")
+    L.append(f"                                   'from': [{xmin:.3f}, {ymin:.3f}, {z_bot:.3f}],")
+    L.append(f"                                   'to':   [{xmax:.3f}, {ymin:.3f}, {z_bot:.3f}]}}}},")
+    L.append(f"        'width (y)':  {{'value': {ymax - ymin:.3f},")
+    L.append(f"                        'anchor': {{'kind': 'linear',")
+    L.append(f"                                   'from': [{xmin:.3f}, {ymin:.3f}, {z_bot:.3f}],")
+    L.append(f"                                   'to':   [{xmin:.3f}, {ymax:.3f}, {z_bot:.3f}]}}}},")
+    L.append(f"        'height (z)': {{'value': {z_top - z_bot:.3f},")
+    L.append(f"                        'anchor': {{'kind': 'linear',")
+    L.append(f"                                   'from': [{xmin:.3f}, {ymin:.3f}, {z_bot:.3f}],")
+    L.append(f"                                   'to':   [{xmin:.3f}, {ymin:.3f}, {z_top:.3f}]}}}},")
+    L.append(f"        'layers':     {len(layers)},")
+    L.append('    }),')
+    if len(layers) > 1:
+        L.append("    ('Layers', {")
+        for i, _ in enumerate(layers, 1):
+            L.append(f"        'L{i} z_base':    {f'L{i}_z0'!r},")
+            L.append(f"        'L{i} thickness': {f'L{i}_t'!r},")
+        L.append('    }),')
+    for i, hg in enumerate(hgs):
+        prefix = 'hole' if i == 0 else f'hole{i + 1}'
+        title = 'Bolt holes (axial)' if i == 0 else f'Axial bores (group {i + 1})'
+        L.append(f"    ({title!r}, {{")
+        L.append(f"        'count': {hg['raw_count']},")
+        L.append(f"        'Ø':     {prefix + '_dia'!r},")
+        L.append(f"        'depth': {prefix + '_depth'!r},")
+        L.append('    }),')
+    for si, lc in enumerate(lats, 1):
+        if saddle_to_layer[si - 1] is None:
+            continue
+        title = 'Saddle' if si == 1 else f'Saddle {si}'
+        L.append(f"    ({title!r}, {{")
+        L.append(f"        'radius': {f'sad{si}_r'!r},")
+        L.append(f'        \'axis\':   "{lc["axis_dir"]}",')
+        L.append(f"        'span':   '{f'sad{si}_b'} - {f'sad{si}_a'}',")
+        if lc.get('arc_coverage_deg') is not None:
+            L.append(f"        'arc°':   {round(lc['arc_coverage_deg'], 1)},")
+        L.append('    }),')
+    L.append(')')
+    L.append('')
+    return L
 
 
 def _slug(name: str) -> str:

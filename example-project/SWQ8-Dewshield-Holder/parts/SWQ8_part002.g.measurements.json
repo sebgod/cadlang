@@ -1,0 +1,168 @@
+{
+  "name": "SWQ8_part002",
+  "units": "mm",
+  "sections": [
+    {
+      "title": "Overall",
+      "rows": [
+        {
+          "label": "length (x)",
+          "value": 120.5,
+          "anchor": {
+            "kind": "linear",
+            "from": [
+              -60.25,
+              -165.2,
+              0.0
+            ],
+            "to": [
+              60.25,
+              -165.2,
+              0.0
+            ]
+          }
+        },
+        {
+          "label": "width (y)",
+          "value": 20.0,
+          "anchor": {
+            "kind": "linear",
+            "from": [
+              -60.25,
+              -165.2,
+              0.0
+            ],
+            "to": [
+              -60.25,
+              -145.2,
+              0.0
+            ]
+          }
+        },
+        {
+          "label": "height (z)",
+          "value": 11.2,
+          "anchor": {
+            "kind": "linear",
+            "from": [
+              -60.25,
+              -165.2,
+              0.0
+            ],
+            "to": [
+              -60.25,
+              -165.2,
+              11.2
+            ]
+          }
+        },
+        {
+          "label": "layers",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "title": "Layers",
+      "rows": [
+        {
+          "label": "L1 z_base",
+          "value": 0.0
+        },
+        {
+          "label": "L1 thickness",
+          "value": 5.6
+        },
+        {
+          "label": "L2 z_base",
+          "value": 5.6
+        },
+        {
+          "label": "L2 thickness",
+          "value": 5.6
+        }
+      ]
+    },
+    {
+      "title": "Bolt holes (axial)",
+      "rows": [
+        {
+          "label": "count",
+          "value": 4
+        },
+        {
+          "label": "\u00d8",
+          "value": 4.3
+        },
+        {
+          "label": "depth",
+          "value": 5.618
+        }
+      ]
+    },
+    {
+      "title": "Saddle",
+      "rows": [
+        {
+          "label": "radius",
+          "value": 125.2
+        },
+        {
+          "label": "axis",
+          "value": "X"
+        },
+        {
+          "label": "span",
+          "value": 120.5
+        },
+        {
+          "label": "arc\u00b0",
+          "value": 9.2
+        }
+      ]
+    },
+    {
+      "title": "Saddle 2",
+      "rows": [
+        {
+          "label": "radius",
+          "value": 120.0
+        },
+        {
+          "label": "axis",
+          "value": "X"
+        },
+        {
+          "label": "span",
+          "value": 90.5
+        },
+        {
+          "label": "arc\u00b0",
+          "value": 9.4
+        }
+      ]
+    },
+    {
+      "title": "Mesh",
+      "rows": [
+        {
+          "label": "bbox x",
+          "value": 120.5
+        },
+        {
+          "label": "bbox y",
+          "value": 20.0
+        },
+        {
+          "label": "bbox z",
+          "value": 11.221
+        },
+        {
+          "label": "volume",
+          "value": 22.922,
+          "unit": "cm\u00b3"
+        }
+      ]
+    }
+  ]
+}

@@ -658,7 +658,36 @@ def emit(assembly: dict, yaml_dir: Path, regenerate: bool = False):
           f'faces={len(combined.faces)}')
     _render_preview(combined, out_png, title=name)
     print(f'cadlang[assembly] wrote {out_png}')
+    _write_assembly_measurements(yaml_dir / f'{slug}.measurements.json',
+                                 name, assembly, placed, combined)
     return combined
+
+
+def _write_assembly_measurements(path, name, assembly, placed, combined):
+    bbox = combined.bounds  # [[xmin,ymin,zmin],[xmax,ymax,zmax]]
+    size = bbox[1] - bbox[0]
+    slot_counts: dict[str, int] = {}
+    for p in placed:
+        slot_counts[p['slot']] = slot_counts.get(p['slot'], 0) + 1
+    sections = [{
+        'title': 'Overall',
+        'rows': [
+            {'label': 'bbox x', 'value': round(float(size[0]), 3)},
+            {'label': 'bbox y', 'value': round(float(size[1]), 3)},
+            {'label': 'bbox z', 'value': round(float(size[2]), 3)},
+            {'label': 'volume', 'value': round(float(combined.volume) / 1000.0, 3),
+             'unit': 'cm³'},
+            {'label': 'instances', 'value': len(placed)},
+            {'label': 'slots', 'value': len(slot_counts)},
+        ],
+    }, {
+        'title': 'Instances per slot',
+        'rows': [{'label': slot, 'value': n}
+                 for slot, n in sorted(slot_counts.items())],
+    }]
+    doc = {'name': name, 'units': 'mm', 'sections': sections}
+    path.write_text(json.dumps(doc, indent=2), encoding='utf-8')
+    print(f'cadlang[assembly] wrote {path}')
 
 
 def _instance_key(slot: str, instance: int) -> str:

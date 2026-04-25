@@ -1,0 +1,121 @@
+{
+  "name": "SWQ8_part001",
+  "units": "mm",
+  "sections": [
+    {
+      "title": "Overall",
+      "rows": [
+        {
+          "label": "ID",
+          "value": 240.0,
+          "anchor": {
+            "kind": "diameter",
+            "from": [
+              -120.0,
+              0.0,
+              0.0
+            ],
+            "to": [
+              120.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "label": "OD",
+          "value": 250.4,
+          "anchor": {
+            "kind": "diameter",
+            "from": [
+              -125.2,
+              0.0,
+              0.0
+            ],
+            "to": [
+              125.2,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "label": "wall",
+          "value": 5.2
+        },
+        {
+          "label": "height",
+          "value": 30.0,
+          "anchor": {
+            "kind": "linear",
+            "from": [
+              125.2,
+              0.0,
+              0.0
+            ],
+            "to": [
+              125.2,
+              0.0,
+              30.0
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "title": "Heat inserts (radial)",
+      "rows": [
+        {
+          "label": "count",
+          "value": 4
+        },
+        {
+          "label": "\u00d8",
+          "value": 4.3
+        },
+        {
+          "label": "depth",
+          "value": 5.219
+        },
+        {
+          "label": "z1",
+          "value": 5.0
+        },
+        {
+          "label": "z2",
+          "value": 11.667
+        },
+        {
+          "label": "z3",
+          "value": 18.333
+        },
+        {
+          "label": "z4",
+          "value": 25.0
+        }
+      ]
+    },
+    {
+      "title": "Mesh",
+      "rows": [
+        {
+          "label": "bbox x",
+          "value": 250.4
+        },
+        {
+          "label": "bbox y",
+          "value": 250.4
+        },
+        {
+          "label": "bbox z",
+          "value": 30.0
+        },
+        {
+          "label": "volume",
+          "value": 118.955,
+          "unit": "cm\u00b3"
+        }
+      ]
+    }
+  ]
+}

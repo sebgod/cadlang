@@ -1,0 +1,143 @@
+{
+  "name": "DewShieldOverlapRing",
+  "units": "mm",
+  "sections": [
+    {
+      "title": "Overall",
+      "rows": [
+        {
+          "label": "ID",
+          "value": 240.5,
+          "anchor": {
+            "kind": "diameter",
+            "from": [
+              -120.25,
+              0.0,
+              0.0
+            ],
+            "to": [
+              120.25,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "label": "OD",
+          "value": 250.0,
+          "anchor": {
+            "kind": "diameter",
+            "from": [
+              -125.0,
+              0.0,
+              0.0
+            ],
+            "to": [
+              125.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "label": "wall",
+          "value": 4.75
+        },
+        {
+          "label": "height",
+          "value": 46.0,
+          "anchor": {
+            "kind": "linear",
+            "from": [
+              125.0,
+              0.0,
+              0.0
+            ],
+            "to": [
+              125.0,
+              0.0,
+              46.0
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "title": "Scope-end chamfer",
+      "rows": [
+        {
+          "label": "axial length",
+          "value": 2.0
+        },
+        {
+          "label": "ID flare",
+          "value": 1.0
+        }
+      ]
+    },
+    {
+      "title": "Rail notches",
+      "rows": [
+        {
+          "label": "count",
+          "value": 4
+        },
+        {
+          "label": "arc",
+          "value": 20.4
+        },
+        {
+          "label": "depth",
+          "value": 32.0
+        }
+      ]
+    },
+    {
+      "title": "Heat inserts (radial)",
+      "rows": [
+        {
+          "label": "count",
+          "value": 8
+        },
+        {
+          "label": "\u00d8",
+          "value": 4.0
+        },
+        {
+          "label": "depth",
+          "value": 4.0
+        },
+        {
+          "label": "z1",
+          "value": 5.0
+        },
+        {
+          "label": "z2",
+          "value": 11.667
+        }
+      ]
+    },
+    {
+      "title": "Mesh",
+      "rows": [
+        {
+          "label": "bbox x",
+          "value": 250.0
+        },
+        {
+          "label": "bbox y",
+          "value": 250.0
+        },
+        {
+          "label": "bbox z",
+          "value": 46.0
+        },
+        {
+          "label": "volume",
+          "value": 154.764,
+          "unit": "cm\u00b3"
+        }
+      ]
+    }
+  ]
+}

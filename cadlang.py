@@ -15,6 +15,7 @@ Supported feature set:
   - Circular pattern around Z for any cut
 """
 from __future__ import annotations
+import json
 import math
 import numpy as np
 
@@ -29,6 +30,10 @@ class Design:
         self.units = units
         self.params = dict(params or {})
         self.features: list[dict] = []
+        # Optional labelled measurements, shown in the GUI viewer next to
+        # the STL. Populated by `measurements(...)`; serialized as a
+        # `<stl_stem>.measurements.json` sidecar by `emit_stl`.
+        self._measurements: list[tuple[str, dict]] = []
 
     # ------ feature constructors ------
     def revolve(self, name, plane, axis, profile):
@@ -54,6 +59,25 @@ class Design:
     def top_face(self, body_name):
         return {'ref': 'top_face', 'body': body_name}
 
+    def measurements(self, *sections):
+        """Declare labelled measurements to surface in the GUI.
+
+        Each section is a ``(title, rows_dict)`` pair. ``rows_dict`` maps a
+        label to a numeric value or an expression string evaluated against
+        ``params``. Example::
+
+            d.measurements(
+                ('Overall', {'ID': 'ring_id', 'OD': 'ring_od',
+                             'height': 'ring_h'}),
+                ('Heat inserts', {'count': 4, 'Ø': 'hole_dia',
+                                  'depth': 'hole_depth'}),
+            )
+        """
+        for sec in sections:
+            title, rows = sec
+            self._measurements.append((str(title), dict(rows)))
+        return self
+
     # ------ expression eval (mm) ------
     def E(self, expr):
         if isinstance(expr, (int, float)):
@@ -74,6 +98,71 @@ class Design:
         if render_png:
             _render(mesh, render_png, title=self.name)
             print(f'cadlang[render] wrote {render_png}')
+        if self._measurements:
+            meas_path = _measurements_path_for(path)
+            doc = self._measurements_doc(mesh)
+            with open(meas_path, 'w', encoding='utf-8') as f:
+                json.dump(doc, f, indent=2)
+            print(f'cadlang[measurements] wrote {meas_path}')
+
+    def _measurements_doc(self, mesh=None):
+        ns = {'math': math, 'pi': math.pi, 'sin': math.sin,
+              'cos': math.cos, **self.params}
+
+        def ev(expr):
+            if isinstance(expr, str):
+                try:
+                    return eval(expr, {'__builtins__': {}}, ns)
+                except Exception:
+                    return expr
+            return expr
+
+        def ev_point(pt):
+            return [round(float(ev(c)), 4) for c in pt]
+
+        sections = []
+        for title, rows in self._measurements:
+            out_rows = []
+            for label, value in rows.items():
+                # Row value may be (a) a number, (b) an expr string, or
+                # (c) a dict {'value': expr, 'anchor': {...}} attaching a
+                # 3D dimension line.
+                anchor = None
+                if isinstance(value, dict) and 'value' in value:
+                    anchor_raw = value.get('anchor')
+                    value = value['value']
+                    if anchor_raw:
+                        anchor = {
+                            'kind': anchor_raw.get('kind', 'linear'),
+                            'from': ev_point(anchor_raw['from']),
+                            'to':   ev_point(anchor_raw['to']),
+                        }
+                v = ev(value) if isinstance(value, str) else value
+                if isinstance(v, float):
+                    v = round(v, 4)
+                row = {'label': str(label), 'value': v}
+                if anchor is not None:
+                    row['anchor'] = anchor
+                out_rows.append(row)
+            sections.append({'title': title, 'rows': out_rows})
+        # Always-included derived stats from the built mesh, when we have one.
+        if mesh is not None:
+            try:
+                bbox = mesh.bounds  # [[xmin, ymin, zmin], [xmax, ymax, zmax]]
+                size = bbox[1] - bbox[0]
+                sections.append({
+                    'title': 'Mesh',
+                    'rows': [
+                        {'label': 'bbox x', 'value': round(float(size[0]), 3)},
+                        {'label': 'bbox y', 'value': round(float(size[1]), 3)},
+                        {'label': 'bbox z', 'value': round(float(size[2]), 3)},
+                        {'label': 'volume', 'value': round(float(mesh.volume) / 1000.0, 3),
+                         'unit': 'cm³'},
+                    ],
+                })
+            except Exception:
+                pass
+        return {'name': self.name, 'units': self.units, 'sections': sections}
 
     def emit_fusion(self, path):
         code = _emit_fusion(self)
@@ -103,6 +192,15 @@ class Circular:
 # =========================================================================
 # STL backend
 # =========================================================================
+
+def _measurements_path_for(stl_path: str) -> str:
+    """Return the sidecar JSON path for a given STL path. Strips a trailing
+    ``.stl`` so `foo.g.stl` → `foo.g.measurements.json`."""
+    base = str(stl_path)
+    if base.lower().endswith('.stl'):
+        base = base[:-4]
+    return base + '.measurements.json'
+
 
 def _build_mesh(d: Design, n_seg: int):
     """Build a watertight mesh by applying features in order via manifold3d CSG."""

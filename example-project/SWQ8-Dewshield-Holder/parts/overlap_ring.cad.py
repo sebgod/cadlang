@@ -68,6 +68,40 @@ d.cut(
     pattern=Circular(axis='Z', count=4),
 )
 
+d.measurements(
+    ('Overall', {
+        'ID': {'value': 'ring_id',
+               'anchor': {'kind': 'diameter',
+                          'from': ['-ring_id/2', 0, 0],
+                          'to':   ['ring_id/2',  0, 0]}},
+        'OD': {'value': 'ring_od',
+               'anchor': {'kind': 'diameter',
+                          'from': ['-ring_od/2', 0, 0],
+                          'to':   ['ring_od/2',  0, 0]}},
+        'wall':   '(ring_od - ring_id) / 2',
+        'height': {'value': 'ring_h',
+                   'anchor': {'kind': 'linear',
+                              'from': ['ring_od/2', 0, 0],
+                              'to':   ['ring_od/2', 0, 'ring_h']}},
+    }),
+    ('Scope-end chamfer', {
+        'axial length': 'chamfer_len',
+        'ID flare':     'chamfer_flare',
+    }),
+    ('Rail notches', {
+        'count': 4,
+        'arc':   'notch_arc',
+        'depth': 'notch_depth',
+    }),
+    ('Heat inserts (radial)', {
+        'count': 8,
+        'Ø':     'hole_dia',
+        'depth': 'hole_depth',
+        'z1':    'hole_z1',
+        'z2':    'hole_z2',
+    }),
+)
+
 if __name__ == '__main__':
     slug = 'overlap_ring'
     d.emit_stl(str(HERE / f'{slug}.stl'),

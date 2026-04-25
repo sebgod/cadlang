@@ -79,11 +79,13 @@ def _walk_project(project_dir: pathlib.Path) -> dict:
         parent = cad_py.parent
         stl = parent / f'{stem}.stl'
         png = parent / f'{stem}_preview.png'
+        meas = parent / f'{stem}.measurements.json'
         parts.append({
             'stem': stem,
             'cad_py': _rel_posix(cad_py, project_dir),
             'stl': _rel_posix(stl, project_dir) if stl.exists() else None,
             'preview_png': _rel_posix(png, project_dir) if png.exists() else None,
+            'measurements': _rel_posix(meas, project_dir) if meas.exists() else None,
             'mtime': cad_py.stat().st_mtime,
             'stl_mtime': stl.stat().st_mtime if stl.exists() else None,
         })
@@ -114,11 +116,13 @@ def _walk_project(project_dir: pathlib.Path) -> dict:
                 intersections = (_read_yaml_safe(inter_path) or {}).get('intersections') or []
             except Exception:
                 intersections = []
+        meas = project_dir / f'{aname}.measurements.json'
         assemblies.append({
             'name': aname,
             'yaml': yml.name,
             'stl': f'{aname}.stl' if stl.exists() else None,
             'preview_png': f'{aname}_preview.png' if png.exists() else None,
+            'measurements': f'{aname}.measurements.json' if meas.exists() else None,
             'stl_mtime': stl.stat().st_mtime if stl.exists() else None,
             'instances': instances,
             'intersections': intersections,
@@ -323,7 +327,11 @@ INDEX_HTML = r"""<!doctype html>
   html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
               font:13px/1.4 -apple-system, "Segoe UI", sans-serif; }
   #app { display:grid; grid-template-columns:300px 1fr;
-         grid-template-rows:44px 1fr 260px; height:100vh; }
+         grid-template-rows:44px 1fr 5px var(--bot-h, 260px);
+         height:100vh; --bot-h:260px; }
+  #gripper { grid-column:2; grid-row:3; cursor:row-resize;
+             background:var(--border); }
+  #gripper:hover, #gripper.dragging { background:var(--accent); }
   header { grid-column:1/3; display:flex; align-items:center; gap:8px;
            padding:0 12px; background:var(--panel);
            border-bottom:1px solid var(--border); }
@@ -334,7 +342,7 @@ INDEX_HTML = r"""<!doctype html>
            padding:6px 12px; border-radius:3px; cursor:pointer; font:inherit; }
   button:hover:not(:disabled) { background:#1177bb; }
   button:disabled { background:#444; color:#999; cursor:not-allowed; }
-  #tree { grid-row:2/4; overflow-y:auto; background:var(--panel);
+  #tree { grid-row:2/5; grid-column:1; overflow-y:auto; background:var(--panel);
           border-right:1px solid var(--border); padding:8px 0; }
   #tree .group { padding:8px 12px 4px; color:var(--muted); font-size:11px;
                  text-transform:uppercase; letter-spacing:0.05em; }
@@ -345,19 +353,35 @@ INDEX_HTML = r"""<!doctype html>
   #tree .item .stem { flex:1; overflow:hidden; text-overflow:ellipsis;
                       white-space:nowrap; }
   #tree .item .badge { font-size:10px; color:var(--muted); }
-  #viewer { position:relative; overflow:hidden; background:#0a0a0a; }
+  #viewer { grid-row:2; grid-column:2; position:relative;
+            overflow:hidden; background:#0a0a0a; }
   #viewer canvas { display:block; }
   #stats { position:absolute; top:8px; right:8px; font-size:11px;
            color:var(--muted); background:rgba(0,0,0,0.5);
            padding:4px 8px; border-radius:3px; pointer-events:none; }
+  #measurements { position:absolute; top:40px; right:8px; max-width:260px;
+                  max-height:calc(100% - 56px); overflow-y:auto;
+                  background:rgba(20,20,20,0.88); border:1px solid var(--border);
+                  border-radius:4px; padding:6px 10px 8px; font-size:11px;
+                  color:var(--fg); display:none; }
+  #measurements.visible { display:block; }
+  #measurements h4 { margin:6px 0 3px; font-size:10px; text-transform:uppercase;
+                     letter-spacing:0.05em; color:var(--muted); font-weight:600; }
+  #measurements h4:first-child { margin-top:0; }
+  #measurements table { width:100%; border-collapse:collapse; }
+  #measurements td { padding:1px 2px; font-variant-numeric:tabular-nums; }
+  #measurements td.label { color:var(--muted); }
+  #measurements td.value { text-align:right; color:var(--fg); }
+  #measurements td.unit  { color:var(--muted); padding-left:4px;
+                           width:1.6em; }
   #cam-tools { position:absolute; top:8px; left:8px; display:flex; gap:3px;
                background:rgba(0,0,0,0.55); padding:4px; border-radius:4px; }
   #cam-tools button { background:#2a2a2a; color:var(--fg); border:none;
                       padding:4px 9px; font-size:11px; border-radius:3px;
                       cursor:pointer; min-width:44px; }
   #cam-tools button:hover { background:#3a3a3a; }
-  #bottom { display:flex; flex-direction:column; background:#111;
-            border-top:1px solid var(--border); min-height:0; }
+  #bottom { grid-row:4; grid-column:2; display:flex; flex-direction:column;
+            background:#111; border-top:1px solid var(--border); min-height:0; }
   .tabs { display:flex; background:#1a1a1a; border-bottom:1px solid var(--border);
           flex:0 0 auto; }
   .tab { background:transparent; color:var(--muted); border:none;
@@ -373,9 +397,14 @@ INDEX_HTML = r"""<!doctype html>
   #log .err { color:#f48771; }
   #log .ok  { color:#89d185; }
   #log .dim { color:var(--muted); }
-  #source  { color:#d4d4d4; tab-size:2; }
-  #source .empty { color:var(--muted); font-style:italic; }
+  #source  { color:#d4d4d4; tab-size:2; padding:0; }
+  #source .empty { color:var(--muted); font-style:italic; padding:6px 12px;
+                   display:block; }
+  #source code.hljs { display:block; padding:6px 12px; background:transparent; }
 </style>
+<link rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.10.0/highlight.min.js"></script>
 </head>
 <body>
 <div id="app">
@@ -397,7 +426,9 @@ INDEX_HTML = r"""<!doctype html>
       <button data-view="right" title="Right (looking at −X)">Right</button>
     </div>
     <div id="stats"></div>
+    <div id="measurements"></div>
   </main>
+  <div id="gripper" title="Drag to resize"></div>
   <div id="bottom">
     <div class="tabs">
       <button class="tab active" data-tab="log">Log</button>
@@ -414,6 +445,7 @@ import { OrbitControls } from 'https://esm.sh/three@0.160.0/examples/jsm/control
 
 const viewer = document.getElementById('viewer');
 const statsEl = document.getElementById('stats');
+const measurementsEl = document.getElementById('measurements');
 const logEl = document.getElementById('log');
 const treeEl = document.getElementById('tree');
 const sourceEl = document.getElementById('source');
@@ -460,6 +492,7 @@ scene.add(grid);
 scene.add(new THREE.AxesHelper(100));
 
 let currentMeshes = [];                 // array of THREE.Mesh currently on screen
+let currentAnchors = [];                // array of {line, sprite} for dimension markers
 let selected = null;                    // {target, label, stl, instances, intersections}
 
 function resize() {
@@ -486,10 +519,15 @@ function frame(obj) { setView('iso'); }
 
 // Named viewpoints. Z-up convention: top view forces up=Y to avoid a gimbal
 // singularity; every other view keeps up=Z (camera.up was set once at init).
+//
+// Framing target is the world origin (0,0,0) — keeps the design-frame axes
+// anchored in-view regardless of where the part's bbox sits. Distance is
+// sized to fit the bbox *expanded to include the origin*, so off-origin
+// parts (rails at x=60+) stay visible.
 function setView(name) {
-  const box = sceneBox();
+  const box = sceneBox().clone().expandByPoint(new THREE.Vector3(0, 0, 0));
   const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
+  const center = new THREE.Vector3(0, 0, 0);
   const d = (Math.max(size.x, size.y, size.z) || 150) * 2.0;
   if (name === 'fit') {
     // Keep current direction, just reframe distance.
@@ -603,9 +641,29 @@ async function loadSTL(opts) {
   }
 }
 
+function keepSpritesOnScreen() {
+  // Scale each anchor's label so it projects to a constant ~44-pixel
+  // height on screen regardless of camera distance. This keeps labels
+  // readable when zoomed out on a large assembly AND when zoomed in on
+  // a small part. Width follows the canvas aspect.
+  if (!currentAnchors.length) return;
+  const h = renderer.domElement.clientHeight || 1;
+  const vFOV = THREE.MathUtils.degToRad(camera.fov);
+  const targetPx = 22;
+  for (const a of currentAnchors) {
+    if (!a.sprite) continue;
+    const dist = camera.position.distanceTo(a.sprite.position);
+    const worldPerPx = (2 * Math.tan(vFOV / 2) * dist) / h;
+    const spriteH = worldPerPx * targetPx;
+    const aspect = a.sprite.userData.aspect || 4;
+    a.sprite.scale.set(spriteH * aspect, spriteH, 1);
+  }
+}
+
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
+  keepSpritesOnScreen();
   renderer.render(scene, camera);
 }
 animate();
@@ -634,11 +692,167 @@ function selectItem(el, opts) {
   btnRebuild.disabled = !opts.target;
   loadSTL(opts);
   loadSource(opts.source);
+  loadMeasurements(opts.measurements);
+}
+
+function _fmtValue(v) {
+  if (typeof v === 'number') {
+    if (Number.isInteger(v)) return String(v);
+    return v.toFixed(Math.abs(v) < 10 ? 3 : 2);
+  }
+  return String(v);
+}
+
+function _clearAnchors() {
+  for (const a of currentAnchors) {
+    scene.remove(a.line);
+    a.line.geometry.dispose();
+    a.line.material.dispose();
+    if (a.sprite) {
+      scene.remove(a.sprite);
+      if (a.sprite.material.map) a.sprite.material.map.dispose();
+      a.sprite.material.dispose();
+    }
+  }
+  currentAnchors = [];
+}
+
+function _makeLabelSprite(text, color) {
+  // Render the label text into a 2D canvas at high res so it scales to any
+  // camera distance without blurring. Width is sized to the text — we
+  // store the aspect ratio on the sprite so the render loop can keep it
+  // a constant pixel height on screen.
+  const fontPx = 60, pad = 14;
+  const measure = document.createElement('canvas').getContext('2d');
+  measure.font = `bold ${fontPx}px "Segoe UI", sans-serif`;
+  const tw = Math.ceil(measure.measureText(text).width);
+  const canvas = document.createElement('canvas');
+  canvas.width = tw + pad * 2;
+  canvas.height = fontPx + pad * 2;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgba(0,0,0,0.82)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
+  ctx.fillStyle = color;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `bold ${fontPx}px "Segoe UI", sans-serif`;
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  tex.anisotropy = 4;
+  tex.needsUpdate = true;
+  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false,
+                                         transparent: true });
+  const s = new THREE.Sprite(mat);
+  // Remember the canvas aspect so the animate loop can pick a world-scale
+  // that projects to a constant pixel height (see keepSpritesOnScreen).
+  s.userData.aspect = canvas.width / canvas.height;
+  return s;
+}
+
+function drawAnchors(doc) {
+  _clearAnchors();
+  // Concentric diameters all pass through the origin so their midpoints
+  // collide. Alternate them across the line so nothing stacks.
+  const tByKind = {
+    diameter: [0.68, 0.32, 0.82, 0.18, 0.92, 0.08],
+    radius:   [0.8, 0.6, 0.4, 0.2],
+    linear:   [0.5, 0.65, 0.35, 0.8, 0.2],
+  };
+  const kindCounts = { diameter: 0, radius: 0, linear: 0 };
+  for (const sec of (doc.sections || [])) {
+    for (const row of (sec.rows || [])) {
+      if (!row.anchor) continue;
+      const a = row.anchor;
+      const kind = a.kind || 'linear';
+      const colorHex = kind === 'diameter' ? 0xffeb3b
+                      : kind === 'radius'  ? 0xff9800 : 0x4fc3f7;
+      const colorCss = '#' + colorHex.toString(16).padStart(6, '0');
+      const p0 = new THREE.Vector3(a.from[0], a.from[1], a.from[2]);
+      const p1 = new THREE.Vector3(a.to[0],   a.to[1],   a.to[2]);
+      const geom = new THREE.BufferGeometry().setFromPoints([p0, p1]);
+      const mat = new THREE.LineBasicMaterial({
+        color: colorHex, depthTest: false, transparent: true, opacity: 0.95,
+      });
+      const line = new THREE.Line(geom, mat);
+      line.renderOrder = 999;
+      scene.add(line);
+      const prefix = kind === 'diameter' ? 'Ø ' : (kind === 'radius' ? 'R ' : '');
+      const sprite = _makeLabelSprite(
+        prefix + row.label + ' = ' + _fmtValue(row.value) +
+        (typeof row.value === 'number' ? ' ' + (row.unit || doc.units || 'mm') : ''),
+        colorCss,
+      );
+      const ts = tByKind[kind] || tByKind.linear;
+      const t = ts[kindCounts[kind] % ts.length];
+      kindCounts[kind]++;
+      sprite.position.copy(p0).lerp(p1, t);
+      // Initial scale is nominal — the animate loop rescales every frame
+      // so sprites are a constant pixel height regardless of zoom.
+      sprite.scale.set(20 * sprite.userData.aspect, 20, 1);
+      sprite.renderOrder = 1000;
+      scene.add(sprite);
+      currentAnchors.push({ line, sprite });
+    }
+  }
+}
+
+async function loadMeasurements(relpath) {
+  _clearAnchors();
+  measurementsEl.classList.remove('visible');
+  measurementsEl.innerHTML = '';
+  if (!relpath) return;
+  let doc;
+  try {
+    const res = await fetch('/files/' + relpath + '?t=' + Date.now());
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    doc = await res.json();
+  } catch (e) {
+    log(`measurements load failed: ${e.message || e}`, 'err');
+    return;
+  }
+  const unit = doc.units || 'mm';
+  for (const sec of (doc.sections || [])) {
+    const h = document.createElement('h4');
+    h.textContent = sec.title;
+    measurementsEl.appendChild(h);
+    const t = document.createElement('table');
+    for (const row of (sec.rows || [])) {
+      const tr = document.createElement('tr');
+      const tdL = document.createElement('td'); tdL.className = 'label';
+      tdL.textContent = row.label;
+      const tdV = document.createElement('td'); tdV.className = 'value';
+      tdV.textContent = _fmtValue(row.value);
+      const tdU = document.createElement('td'); tdU.className = 'unit';
+      tdU.textContent = row.unit || (typeof row.value === 'number' ? unit : '');
+      tr.appendChild(tdL); tr.appendChild(tdV); tr.appendChild(tdU);
+      t.appendChild(tr);
+    }
+    measurementsEl.appendChild(t);
+  }
+  if (measurementsEl.children.length) measurementsEl.classList.add('visible');
+  drawAnchors(doc);
+}
+
+function _langForPath(relpath) {
+  const p = relpath.toLowerCase();
+  if (p.endsWith('.py')) return 'python';
+  if (p.endsWith('.yaml') || p.endsWith('.yml') || p.endsWith('.cadlang')) return 'yaml';
+  if (p.endsWith('.json')) return 'json';
+  if (p.endsWith('.md')) return 'markdown';
+  return 'plaintext';
 }
 
 async function loadSource(relpath) {
+  sourceEl.innerHTML = '';
   if (!relpath) {
-    sourceEl.innerHTML = '<span class="empty">(no source file for this item)</span>';
+    const empty = document.createElement('span');
+    empty.className = 'empty';
+    empty.textContent = '(no source file for this item)';
+    sourceEl.appendChild(empty);
     sourcePathEl.textContent = '';
     return;
   }
@@ -646,11 +860,43 @@ async function loadSource(relpath) {
   try {
     const res = await fetch('/files/' + relpath + '?t=' + Date.now());
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    sourceEl.textContent = await res.text();
+    const text = await res.text();
+    const code = document.createElement('code');
+    code.className = 'language-' + _langForPath(relpath);
+    code.textContent = text;
+    sourceEl.appendChild(code);
+    if (window.hljs) hljs.highlightElement(code);
   } catch (e) {
     sourceEl.innerHTML = `<span class="empty">load failed: ${e.message || e}</span>`;
   }
 }
+
+// Draggable gripper between viewer and bottom pane — adjusts the `--bot-h`
+// CSS var that drives the grid's bottom-row height.
+(function initGripper() {
+  const gripper = document.getElementById('gripper');
+  const app = document.getElementById('app');
+  let dragging = false;
+  gripper.addEventListener('mousedown', e => {
+    dragging = true;
+    gripper.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const h = Math.max(80, Math.min(window.innerHeight - 120,
+                                    window.innerHeight - e.clientY));
+    app.style.setProperty('--bot-h', h + 'px');
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    gripper.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    resize();
+  });
+})();
 
 for (const tab of document.querySelectorAll('.tab')) {
   tab.addEventListener('click', () => {
@@ -684,6 +930,7 @@ async function refreshTree() {
       treeEl.appendChild(mkItem(a.name, {
         target: 'assembly:' + a.yaml,
         stl: a.stl, source: a.yaml,
+        measurements: a.measurements,
         instances: a.instances || [],
         intersections: a.intersections || [],
         badge,
@@ -698,6 +945,7 @@ async function refreshTree() {
       treeEl.appendChild(mkItem(p.stem, {
         target: 'part:' + p.cad_py,
         stl: p.stl, source: p.cad_py,
+        measurements: p.measurements,
         badge: p.stl ? '' : 'no stl',
       }));
     }

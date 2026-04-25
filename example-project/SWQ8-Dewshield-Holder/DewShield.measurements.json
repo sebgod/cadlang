@@ -1,0 +1,61 @@
+{
+  "name": "DewShield",
+  "units": "mm",
+  "sections": [
+    {
+      "title": "Overall",
+      "rows": [
+        {
+          "label": "bbox x",
+          "value": 261.6
+        },
+        {
+          "label": "bbox y",
+          "value": 261.6
+        },
+        {
+          "label": "bbox z",
+          "value": 257.667
+        },
+        {
+          "label": "volume",
+          "value": 576.049,
+          "unit": "cm\u00b3"
+        },
+        {
+          "label": "instances",
+          "value": 11
+        },
+        {
+          "label": "slots",
+          "value": 5
+        }
+      ]
+    },
+    {
+      "title": "Instances per slot",
+      "rows": [
+        {
+          "label": "bottom_ring",
+          "value": 1
+        },
+        {
+          "label": "lower_rails",
+          "value": 4
+        },
+        {
+          "label": "middle_ring",
+          "value": 1
+        },
+        {
+          "label": "top_ring",
+          "value": 1
+        },
+        {
+          "label": "upper_rails",
+          "value": 4
+        }
+      ]
+    }
+  ]
+}
