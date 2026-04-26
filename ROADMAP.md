@@ -35,9 +35,16 @@ cadlang v0.2 covers:
 - `cadlang gui` — local web UI (three.js viewer, tree of parts and
   assemblies, rebuild buttons, hot-reload on source edits,
   intersection-highlight coloring).
-- Tests (`tests/`, pytest, 24 tests, ~0.5 s) — Tier 1 importer +
-  mate-solver analysis, Tier 2 geometry pipeline (volumes / bbox /
-  watertight).
+- Tests (`tests/`, pytest, 34 tests) — Tier 1 importer + mate-solver
+  analysis, Tier 1.5 sketch-solver behaviour, Tier 2 geometry pipeline
+  (volumes / bbox / watertight).
+- `sketch.Sketch` — constraint-based 2D sketches via
+  `python-solvespace`. Lines, circles, fix/H/V/parallel/perpendicular/
+  coincident/equal/tangent geometric constraints, distance/length/
+  angle/diameter/radius dimensional constraints (expressions reference
+  `Design.params`). `Design.extrude(sketch=…)` wires it through to
+  manifold3d for STL and to native Fusion sketch + parametric
+  `SketchDimensions` for the Fusion script.
 
 ---
 
@@ -56,6 +63,57 @@ cadlang v0.2 covers:
 - True CSG merge in assembly output — right now the combined STL is
   `trimesh.util.concatenate`-d; shells stay distinct. Swap to a
   manifold3d union once the bodies are known-watertight.
+
+---
+
+## Sketches (`sketch.py`)
+
+**Shipped (v1):**
+- `Sketch` recipe: `Point`, `Line`, `Circle`, plus `rectangle()` /
+  `polygon()` sugar.
+- Geometric constraints: `fix`, `horizontal`, `vertical`, `parallel`,
+  `perpendicular`, `coincident`, `equal`, `tangent`.
+- Dimensional constraints: `distance`, `length`, `angle`, `diameter`,
+  `radius`. Values can be numbers or expression strings against
+  `Design.params`.
+- Closed-loop auto-detection: a single closed line chain becomes the
+  CCW profile; non-closed/disjoint sketches return an empty profile
+  (still useful for constraint exploration).
+- `Design.extrude(sketch=…)` wired through both STL and Fusion
+  backends. Fusion emits native sketch + geometric/dimensional
+  constraints with `SketchDimension.parameter.expression` set to the
+  cadlang expression — so dimensions track `userParameters` and the
+  sketch re-solves natively in Fusion.
+- Re-entrant `Sketch.solve(params)` — the same recipe can be solved
+  multiple times with different param sets without rebuild.
+- Tier 1.5 tests: solver behaviour (over-/under-constrained,
+  perpendicular angle assertion, exact-corner solve).
+
+**Next up:**
+- `cut(sketch=Sketch(…))` — wire the sketch path into the cut backend
+  (currently still uses `Rect`/`Circle` primitives only).
+- Arcs (`Sketch.arc(...)`), tangent-arc constraints, `slot()` sugar.
+  Unblocks fillets-via-sketch and the saddle/lateral cuts the importer
+  detects.
+- Multiple loops in one sketch — outer + inner (holes), or several
+  disjoint outers as multi-profile extrudes. Profile detector returns
+  a list, manifold3d already supports holes via `CrossSection`.
+- Sketches on non-`XY` workplanes (`'XZ'`, `'YZ'`, and arbitrary
+  offset-and-rotated planes for sketches on body faces).
+- Surface a friendlier DOF / over-constrained report — solvespace
+  returns a raw failure-handle list; map back to constraint objects
+  with names. Today we expose the raw indices on `SketchSolveError`.
+- STEP importer: optionally emit `Sketch(...)` recipes instead of
+  point lists. Bigger generated `.g.cad.py` but easier to hand-tune
+  the importer's first-pass shape.
+- Migrate hand-written parts in `example-project/` to sketches once
+  the cut path lands (the ring's heat-insert bores are the natural
+  candidate).
+
+**Not started:**
+- 3D constraint problems (e.g. expressing assembly mates as 3D
+  constraints rather than the current frame-alignment solver).
+  Out of scope for v1; the sketch API is intentionally 2D-only.
 
 ---
 
