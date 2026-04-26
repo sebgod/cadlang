@@ -4,3 +4,4 @@ matplotlib>=3.10
 manifold3d>=3.4
 pyyaml>=6.0
 scipy>=1.10          # trimesh.proximity + ray ops need scipy's cKDTree
+python-solvespace>=3.0.8  # 2D constraint solver behind cadlang.sketch (GPLv3+)

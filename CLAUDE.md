@@ -56,11 +56,13 @@ Reverse direction (optional):
 ```
 cadlang/
 ├── cadlang.py            # Design class + STL/Fusion backends + `cadlang build` / `cadlang gui` CLI
+├── sketch.py             # 2D constraint-based sketches (python-solvespace)
 ├── stepimport.py         # STEP reader + feature recogniser + .cad.py emitter
 ├── assembly.py           # YAML assembly loader + mate solver + always-on intersection check
 ├── gui.py                # local web UI (stdlib HTTP server + three.js viewer)
-├── tests/                # pytest suite — importer + mate-solver + geometry pipeline
+├── tests/                # pytest suite — importer + sketch + mate-solver + geometry pipeline
 ├── CLAUDE.md             # this file — contributor/agent reference
+├── LICENSE               # GPLv3+
 ├── README.md             # user-facing quick start
 ├── ROADMAP.md            # direction + open follow-ups across the tooling
 ├── requirements.txt      # pinned minor versions
@@ -159,14 +161,67 @@ d.extrude(name='plate', on='XY', height='thickness', profile=[
 # …or with an offset plane:
 d.extrude(name='step', on=OffsetPlane(base='XY', distance='z_base'),
           height='step_height', profile=[...])
+# …or with a constraint-based Sketch (see "Sketches" below):
+d.extrude(name='plate', on='XY', height='H', sketch=sk)
 ```
 
 - `on`: `'XY'` or `OffsetPlane(base='XY', distance=expr)`. Non-XY planes
   not supported yet.
-- `profile`: list of `(x, y)` points in the sketch plane. Auto-closed.
+- Provide exactly one of `profile=` (point list) or `sketch=` (a
+  `Sketch` from `sketch.py`).
 - `height`: signed; positive extrudes along +plane-normal (+Z).
 
 Multiple `revolve` or `extrude` features get unioned into one body.
+
+### Sketches (`sketch.py`)
+
+Constraint-based 2D sketches, solved by `python-solvespace`. Use as an
+alternative to point-list profiles when you want geometric/dimensional
+constraints (and a Fusion sketch that re-solves natively against
+`userParameters`).
+
+```python
+from sketch import Sketch
+
+sk = Sketch()                          # XY workplane
+p1 = sk.point(0, 0, fix=True)
+p2 = sk.point(50, 0)
+p3 = sk.point(50, 30)
+p4 = sk.point(0, 30)
+l1 = sk.line(p1, p2);  l2 = sk.line(p2, p3)
+l3 = sk.line(p3, p4);  l4 = sk.line(p4, p1)
+sk.horizontal(l1, l3); sk.vertical(l2, l4)
+sk.distance(p1, p2, 'L')   # references Design.params['L']
+sk.distance(p1, p4, 'W')
+
+# Or with sugar:
+sk.rectangle(corner=(0, 0), width='L', height='W')
+```
+
+Constraints supported in v1:
+
+- Geometric: `fix`, `horizontal`, `vertical`, `parallel`, `perpendicular`,
+  `coincident`, `equal` (length/radius), `tangent`.
+- Dimensional: `distance` (point-point), `length` (line), `angle`,
+  `diameter`, `radius`. Each accepts a number or expression string
+  evaluated against `Design.params`.
+
+Sugar: `rectangle(corner, width, height)`, `polygon(points, closed=True)`.
+
+Backends:
+
+- **STL**: cadlang calls `sk.solve(d.params)` and feeds the resolved
+  CCW loop into the existing manifold3d path.
+- **Fusion**: emits native `sketchCurves.sketchLines.addByTwoPoints`,
+  `geometricConstraints.add*`, and `sketchDimensions.add*` calls.
+  Dimension expressions reference user parameters by name (e.g.
+  `_d0.parameter.expression = 'L'`), so the Fusion sketch stays
+  parametric — change `L` in Modify → Change Parameters and the geometry
+  re-solves natively.
+
+Limitations in v1: workplane must be `'XY'`; only one closed line chain
+per sketch (or a single bare circle); no arcs; cuts still use the legacy
+`Rect`/`Circle` primitives.
 
 ### Feature: cut
 
@@ -229,10 +284,14 @@ d.emit_fusion(path)
 | `revolve(XZ, Z, profile)`               | ✅  | ✅     | ✅        |
 | `extrude(on='XY', profile, height)`     | ✅  | ✅     | ✅ (bbox only, layered) |
 | `extrude(OffsetPlane('XY', …))`         | ✅  | ✅     | ✅        |
+| `extrude(sketch=Sketch(…))`             | ✅  | ✅ (native sketch + parametric dims) | ❌ |
 | `cut(top_face, Rect, Circular)`         | ✅  | ✅     | ❌        |
 | `cut(OffsetPlane('YZ'), Circle, Circ.)` | ✅  | ✅     | ✅        |
 | `cut(OffsetPlane('YZ'), Circle)` (span) | ✅  | ✅     | ✅ (saddle) |
 | `cut(OffsetPlane('XY'), Circle)`        | ✅  | ✅     | ✅ (axial bores) |
+| `cut(sketch=Sketch(…))`                 | ❌  | ❌     | ❌        |
+| Sketch arcs / tangent constraints       | ❌  | ❌     | ❌        |
+| Non-XY sketch workplanes                | ❌  | ❌     | ❌        |
 | Non-XZ revolves / non-Z axes            | ❌  | 🚧     | ❌        |
 | Fillets, chamfers as ops                | ❌  | ❌     | ❌        |
 | STL → cadlang importer                  | —   | —      | ❌        |
@@ -432,10 +491,21 @@ the new `on` branch, and make sure `_emit_cut` can render it in Fusion
 
 - Windows x64, Python 3.10. Just call `python`, never `python3`.
 - `pip install -r requirements.txt` covers numpy, trimesh, matplotlib,
-  manifold3d. The last one is the CSG kernel; without it no STL.
+  manifold3d, and python-solvespace. manifold3d is the CSG kernel
+  (without it no STL); python-solvespace is the 2D constraint solver
+  behind `sketch.py`.
 - Fusion 360 API internally uses cm. `cadlang` auto-converts numeric point
   coordinates mm→cm when emitting the Fusion script; expression strings
   with unit suffixes (`'10 mm'`) pass through unchanged.
+
+## Licensing
+
+cadlang is **GPLv3+**. The `LICENSE` file at the repo root is the
+canonical text. The choice is forced by `python-solvespace`, which is
+GPLv3+ with no LGPL/linking exception — depending on it at runtime makes
+the combined work GPL on distribution, so cadlang itself is GPL too.
+Any new dependency that is GPL-incompatible must be flagged before
+merging.
 
 ## Invariants
 

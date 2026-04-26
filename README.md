@@ -20,7 +20,11 @@ Python 3.10+ on Windows x64:
 python -m pip install -r requirements.txt
 ```
 
-Pulls in `numpy`, `trimesh`, `matplotlib`, and `manifold3d` (the CSG kernel).
+Pulls in `numpy`, `trimesh`, `matplotlib`, `manifold3d` (the CSG kernel),
+and `python-solvespace` (the 2D constraint solver behind `sketch.py`).
+
+cadlang is **GPLv3+** (forced by `python-solvespace`'s license — see
+`LICENSE`).
 
 ## Folder layout
 
@@ -113,7 +117,10 @@ edit the generated files — they're overwritten.
 
 - `revolve(plane='XZ', axis='Z', profile=…)` — axisymmetric bodies
 - `extrude(on='XY' | OffsetPlane('XY', …), profile=…, height=…)` — prismatic
-  bodies
+  bodies. Also accepts `sketch=Sketch(…)` for constraint-based 2D sketches
+  (lines + circles + H/V/parallel/perpendicular/coincident/distance/angle/
+  diameter constraints, solved by `python-solvespace`); the Fusion script
+  emits a native sketch with parametric dimensions.
 - `cut(on=top_face(body) | OffsetPlane('YZ'|'XY', …), sketch=[Rect|Circle…],
   depth=…, pattern=Circular(…))`
 - STEP importer: revolve detection, layered extrude detection, radial bore

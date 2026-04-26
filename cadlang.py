@@ -41,13 +41,26 @@ class Design:
                               'axis': axis, 'profile': list(profile)})
         return self
 
-    def extrude(self, name, on, profile, height):
+    def extrude(self, name, on, height, profile=None, sketch=None):
         """Extrude a closed 2D polygon into a prismatic body.
-        `on` is 'XY' (at z=0) or OffsetPlane(base='XY', distance=expr).
-        `profile` is [(x, y), ...] in the plane. `height` is signed; positive
-        extrudes in +plane-normal direction."""
-        self.features.append({'op': 'extrude', 'name': name, 'on': on,
-                              'profile': list(profile), 'height': height})
+
+        ``on`` is ``'XY'`` (at z=0) or ``OffsetPlane(base='XY', distance=expr)``.
+        ``height`` is signed; positive extrudes in +plane-normal direction.
+
+        Provide exactly one of:
+
+        * ``profile=[(u, v), ...]`` — explicit point list in plane-local
+          coords. Each entry is a number or expression string. Same
+          legacy API as before.
+        * ``sketch=Sketch(...)`` — a constraint-based sketch whose
+          ``solve()`` produces the closed loop at emit time.
+        """
+        if (profile is None) == (sketch is None):
+            raise ValueError('extrude() needs exactly one of profile= or sketch=')
+        feat = {'op': 'extrude', 'name': name, 'on': on, 'height': height,
+                'profile': list(profile) if profile is not None else None,
+                'sketch': sketch}
+        self.features.append(feat)
         return self
 
     def cut(self, name, on, sketch, depth, pattern=None):
@@ -193,6 +206,29 @@ class Circular:
 # STL backend
 # =========================================================================
 
+def _resolve_profile(d: Design, feat: dict):
+    """Resolve a feature's profile into a list of numeric (u, v) pairs.
+
+    Supports both the legacy ``profile=[...]`` path (each entry is an
+    expression string or number) and the new ``sketch=Sketch(...)`` path
+    (solvespace-backed constraint solver). Solved sketch results are
+    cached on the feature dict so the Fusion backend can re-use them
+    without solving twice."""
+    sk = feat.get('sketch')
+    if sk is not None:
+        cached = feat.get('_solved')
+        if cached is None:
+            cached = sk.solve(d.params)
+            feat['_solved'] = cached
+        if not cached.profile:
+            raise ValueError(
+                f'extrude {feat["name"]!r}: sketch has no closed line '
+                f'profile (circle-only profiles not yet supported in '
+                f'extrude — use cut() with a Circle sketch)')
+        return cached.profile
+    return [(d.E(u), d.E(v)) for (u, v) in feat['profile']]
+
+
 def _measurements_path_for(stl_path: str) -> str:
     """Return the sidecar JSON path for a given STL path. Strips a trailing
     ``.stl`` so `foo.g.stl` → `foo.g.measurements.json`."""
@@ -250,7 +286,7 @@ def _build_extrude(d: Design, feat: dict):
     import manifold3d as m3d
 
     on = feat['on']
-    profile = [(d.E(u), d.E(v)) for (u, v) in feat['profile']]
+    profile = _resolve_profile(d, feat)
     h = d.E(feat['height'])
     if h == 0:
         raise ValueError(f'extrude height must be non-zero (got {h})')
@@ -524,18 +560,186 @@ def _emit_extrude(w, d, f):
         w(f'        # UNSUPPORTED extrude plane {on!r}')
         return
     w(f'        sk.name = {f["name"]+"_profile"!r}')
-    w('        _L = sk.sketchCurves.sketchLines')
-    pts_cm = []
-    for u, v in f['profile']:
-        uu, vv = d.E(u) / 10.0, d.E(v) / 10.0
-        pts_cm.append(f'adsk.core.Point3D.create({uu:.6f}, {vv:.6f}, 0)')
-    w('        _P = [' + ', '.join(pts_cm) + ']')
-    w('        for i in range(len(_P)): _L.addByTwoPoints(_P[i], _P[(i+1) % len(_P)])')
+
+    if f.get('sketch') is not None:
+        _emit_sketch_geometry(w, d, f)
+    else:
+        w('        _L = sk.sketchCurves.sketchLines')
+        pts_cm = []
+        for u, v in f['profile']:
+            uu, vv = d.E(u) / 10.0, d.E(v) / 10.0
+            pts_cm.append(f'adsk.core.Point3D.create({uu:.6f}, {vv:.6f}, 0)')
+        w('        _P = [' + ', '.join(pts_cm) + ']')
+        w('        for i in range(len(_P)): _L.addByTwoPoints(_P[i], _P[(i+1) % len(_P)])')
+
     w('        prof = sk.profiles.item(0)')
     w(f'        _eI = root.features.extrudeFeatures.createInput(prof, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)')
     w(f'        _eI.setDistanceExtent(False, adsk.core.ValueInput.createByString({_expr_str(f["height"], d.units)!r}))')
     w('        body = root.features.extrudeFeatures.add(_eI).bodies.item(0)')
     w(f'        body.name = {f["name"]!r}')
+
+
+def _emit_sketch_geometry(w, d, f):
+    """Emit Fusion native sketch entities + geometric constraints +
+    sketch dimensions for a feature whose ``sketch=`` is a
+    ``sketch.Sketch``. Assumes a Fusion ``sk`` variable already exists
+    in the emitted code, holding an ``adsk.fusion.Sketch`` on the right
+    plane.
+
+    Produces parametric sketches: dimension expressions reference
+    ``userParameters`` by name when the cadlang expression does.
+    """
+    from sketch import Circle as _SkCircle
+    from sketch import Line as _SkLine
+    from sketch import Point as _SkPoint
+
+    sketch = f['sketch']
+    cached = f.get('_solved')
+    if cached is None:
+        cached = sketch.solve(d.params)
+        f['_solved'] = cached
+    pts_uv = cached.points              # eid → (u, v) in mm
+
+    w('        _L  = sk.sketchCurves.sketchLines')
+    w('        _C  = sk.sketchCurves.sketchCircles')
+    w('        _GC = sk.geometricConstraints')
+    w('        _SD = sk.sketchDimensions')
+
+    # eid → emitted-variable expression. SketchPoints are referenced as
+    # ``_lnN.startSketchPoint`` / ``_ciN.centerSketchPoint`` etc.
+    sp_var: dict[int, str] = {}
+    ln_var: dict[int, str] = {}
+    cir_var: dict[int, str] = {}
+
+    # ---- Lines (re-using already-emitted SketchPoints when an endpoint
+    # is shared with a previously emitted line). Sharing the SketchPoint
+    # at construction time saves an explicit coincident constraint. ----
+    for i, ln in enumerate(sketch._lines):
+        a, b = ln.start.eid, ln.end.eid
+        ax, ay = pts_uv[a]; bx, by = pts_uv[b]
+        ax_cm, ay_cm = ax / 10.0, ay / 10.0
+        bx_cm, by_cm = bx / 10.0, by / 10.0
+        v = f'_ln{i}'
+        ln_var[ln.eid] = v
+        a_have = a in sp_var; b_have = b in sp_var
+        if a_have and b_have:
+            w(f'        {v} = _L.addByTwoPoints({sp_var[a]}, {sp_var[b]})')
+        elif a_have:
+            w(f'        {v} = _L.addByTwoPoints({sp_var[a]}, '
+              f'adsk.core.Point3D.create({bx_cm:.6f}, {by_cm:.6f}, 0))')
+            sp_var[b] = f'{v}.endSketchPoint'
+        elif b_have:
+            w(f'        {v} = _L.addByTwoPoints('
+              f'adsk.core.Point3D.create({ax_cm:.6f}, {ay_cm:.6f}, 0), '
+              f'{sp_var[b]})')
+            sp_var[a] = f'{v}.startSketchPoint'
+        else:
+            w(f'        {v} = _L.addByTwoPoints('
+              f'adsk.core.Point3D.create({ax_cm:.6f}, {ay_cm:.6f}, 0), '
+              f'adsk.core.Point3D.create({bx_cm:.6f}, {by_cm:.6f}, 0))')
+            sp_var[a] = f'{v}.startSketchPoint'
+            sp_var[b] = f'{v}.endSketchPoint'
+
+    # ---- Circles. Take initial center+radius from the cadlang solve.
+    # Order of cached.circles matches sketch._circles. ----
+    for i, c in enumerate(sketch._circles):
+        sc = cached.circles[i]
+        cx_cm, cy_cm = sc.cx / 10.0, sc.cy / 10.0
+        r_cm = sc.r / 10.0
+        v = f'_ci{i}'; cir_var[c.eid] = v
+        w(f'        {v} = _C.addByCenterRadius('
+          f'adsk.core.Point3D.create({cx_cm:.6f}, {cy_cm:.6f}, 0), {r_cm:.6f})')
+        if c.center.eid not in sp_var:
+            sp_var[c.center.eid] = f'{v}.centerSketchPoint'
+
+    # ---- Standalone Points that aren't endpoints of any line/circle:
+    # add as sketch points so later constraints have something to refer
+    # to. ----
+    for pt in sketch._points:
+        if pt.eid not in sp_var:
+            ux_cm, uy_cm = pts_uv[pt.eid][0] / 10.0, pts_uv[pt.eid][1] / 10.0
+            v = f'_p{pt.eid}'
+            w(f'        {v} = sk.sketchPoints.add('
+              f'adsk.core.Point3D.create({ux_cm:.6f}, {uy_cm:.6f}, 0))')
+            sp_var[pt.eid] = v
+
+    # ---- Fix points (Fusion: SketchPoint.isFixed = True) ----
+    for pt in sketch._points:
+        if pt.fix:
+            w(f'        {sp_var[pt.eid]}.isFixed = True')
+
+    # ---- Helper: resolve a sketch entity to its emitted Fusion var ----
+    def ent_var(ent):
+        if isinstance(ent, _SkPoint):  return sp_var[ent.eid]
+        if isinstance(ent, _SkLine):   return ln_var[ent.eid]
+        if isinstance(ent, _SkCircle): return cir_var[ent.eid]
+        raise ValueError(f'unknown sketch entity {ent!r}')
+
+    # ---- Geometric constraints ----
+    for gc in sketch._geom_cons:
+        kind = gc['kind']; args = gc['args']
+        if kind == 'horizontal':
+            w(f'        _GC.addHorizontal({ent_var(args[0])})')
+        elif kind == 'vertical':
+            w(f'        _GC.addVertical({ent_var(args[0])})')
+        elif kind == 'parallel':
+            w(f'        _GC.addParallel({ent_var(args[0])}, {ent_var(args[1])})')
+        elif kind == 'perpendicular':
+            w(f'        _GC.addPerpendicular({ent_var(args[0])}, {ent_var(args[1])})')
+        elif kind == 'coincident':
+            w(f'        _GC.addCoincident({ent_var(args[0])}, {ent_var(args[1])})')
+        elif kind == 'equal':
+            w(f'        _GC.addEqual({ent_var(args[0])}, {ent_var(args[1])})')
+        elif kind == 'tangent':
+            w(f'        _GC.addTangent({ent_var(args[0])}, {ent_var(args[1])})')
+        else:
+            w(f'        # UNSUPPORTED geometric constraint {kind!r}')
+
+    # ---- Dimensional constraints. Set dim.parameter.expression so the
+    # dimension references a userParameter when cadlang did. ----
+    for j, dc in enumerate(sketch._dim_cons):
+        kind = dc['kind']; args = dc['args']
+        ex_str = _fusion_dim_expr(dc['expr'], dc.get('factor', 1.0), d.units)
+        dvar = f'_d{j}'
+        if kind == 'distance':
+            ax, ay = pts_uv[args[0].eid]; bx, by = pts_uv[args[1].eid]
+            tx_cm = ((ax + bx) / 2 + 5.0) / 10.0
+            ty_cm = ((ay + by) / 2 + 5.0) / 10.0
+            w(f'        {dvar} = _SD.addDistanceDimension({ent_var(args[0])}, '
+              f'{ent_var(args[1])}, '
+              f'adsk.fusion.DimensionOrientations.AlignedDimensionOrientation, '
+              f'adsk.core.Point3D.create({tx_cm:.6f}, {ty_cm:.6f}, 0))')
+            w(f'        {dvar}.parameter.expression = {ex_str!r}')
+        elif kind == 'angle':
+            w(f'        {dvar} = _SD.addAngularDimension({ent_var(args[0])}, '
+              f'{ent_var(args[1])}, adsk.core.Point3D.create(0, 0, 0))')
+            w(f'        {dvar}.parameter.expression = {ex_str!r}')
+        elif kind == 'diameter':
+            sc = next(sc for sc, c in zip(cached.circles, sketch._circles)
+                      if c.eid == args[0].eid)
+            tx_cm = (sc.cx + sc.r) / 10.0
+            ty_cm = sc.cy / 10.0
+            w(f'        {dvar} = _SD.addDiameterDimension({ent_var(args[0])}, '
+              f'adsk.core.Point3D.create({tx_cm:.6f}, {ty_cm:.6f}, 0))')
+            w(f'        {dvar}.parameter.expression = {ex_str!r}')
+        else:
+            w(f'        # UNSUPPORTED dimensional constraint {kind!r}')
+
+
+def _fusion_dim_expr(expr, factor, units):
+    """Render a sketch-dim expression suitable for
+    ``SketchDimension.parameter.expression``. References to user
+    parameters pass through verbatim; numeric literals get a unit
+    suffix so Fusion knows how to interpret them."""
+    if factor == 1.0:
+        if isinstance(expr, str):
+            return expr
+        return f'{float(expr)} {units}'
+    # factor ≠ 1: wrap the expression. Fusion's expression parser handles
+    # arithmetic on userParameters cleanly.
+    if isinstance(expr, str):
+        return f'({expr}) * {factor}'
+    return f'{float(expr) * factor} {units}'
 
 
 def _emit_cut(w, d, f, body_name):

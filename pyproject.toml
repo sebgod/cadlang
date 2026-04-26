@@ -9,6 +9,8 @@ description = "Declarative DSL for 3D CAD parts in Python — emits STL (via man
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Sebastian Godelet" }]
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 keywords = ["cad", "3d", "stl", "fusion360", "step", "dsl", "manifold3d"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -26,6 +28,7 @@ dependencies = [
     "manifold3d>=3.4",
     "pyyaml>=6.0",
     "scipy>=1.10",
+    "python-solvespace>=3.0.8",
 ]
 
 [project.optional-dependencies]
@@ -39,4 +42,4 @@ Homepage = "https://github.com/sebgod/cadlang"
 Repository = "https://github.com/sebgod/cadlang"
 
 [tool.setuptools]
-py-modules = ["cadlang", "assembly", "stepimport", "gui"]
+py-modules = ["cadlang", "assembly", "stepimport", "gui", "sketch"]

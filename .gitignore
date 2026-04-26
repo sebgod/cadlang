@@ -22,3 +22,8 @@ resume.txt
 
 # pytest
 .pytest_cache/
+
+# spike/ artifacts — regenerable from spike/*.py
+spike/*.stl
+spike/*_fusion.py
+spike/*_preview.png
